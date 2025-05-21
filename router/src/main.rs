@@ -171,6 +171,22 @@ struct Args {
     /// Unused for gRPC servers
     #[clap(long, env)]
     cors_allow_origin: Option<Vec<String>>,
+
+    /// The path to the LanceDB data directory for the search API.
+    /// This is only used if the search API is enabled and launched by the router.
+    #[clap(long, env)]
+    search_api_lancedb_path: Option<String>,
+
+    /// The port for the Python search API FastAPI server.
+    /// This is only used if the search API is enabled and launched by the router.
+    #[clap(long, env, default_value = "8001")]
+    search_api_port: u16,
+    
+    /// The model path/ID for the Python search API FastAPI server.
+    /// This is only used if the search API is enabled and launched by the router.
+    /// Defaults to the main model_id if not specified.
+    #[clap(long, env)]
+    search_api_model_path: Option<String>,
 }
 
 #[tokio::main]
