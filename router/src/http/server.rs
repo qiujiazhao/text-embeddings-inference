@@ -7,7 +7,7 @@ use crate::http::types::{
     RerankRequest, RerankResponse, Sequence, SimilarityInput, SimilarityParameters,
     SimilarityRequest, SimilarityResponse, SimpleToken, SparseValue, TokenizeInput,
     TokenizeRequest, TokenizeResponse, TruncationDirection, VertexPrediction, VertexRequest,
-    VertexResponse,
+    VertexResponse, SearchQuery, SearchResponse,
 };
 use crate::{
     logging, shutdown, ClassifierModel, EmbeddingModel, ErrorResponse, ErrorType, Info, ModelType,
@@ -1579,6 +1579,55 @@ async fn vertex_compatibility(
     Ok(Json(VertexResponse { predictions }))
 }
 
+/// Search for relevant documents based on a query.
+#[utoipa::path(
+post,
+tag = "Text Embeddings Inference",
+path = "/search",
+request_body = SearchQuery,
+responses(
+(status = 200, description = "Search results returned successfully", body = Vec<SearchResponse>),
+(status = 422, description = "Validation Error: Request body is invalid", body = ErrorResponse, example = json!({"error": "Failed to deserialize request body: invalid type: integer `123`, expected a string for field `question`", "error_type": "validation"})),
+(status = 500, description = "Internal Server Error", body = ErrorResponse, example = json!({"error": "An unexpected error occurred during search", "error_type": "backend"}))
+)
+)]
+#[instrument(skip_all, fields(total_time, queue_time, search_processing_time))]
+async fn search(
+    Extension(context): Extension<Option<opentelemetry::Context>>,
+    Json(req): Json<SearchQuery>,
+) -> Result<Json<Vec<SearchResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    let span = tracing::Span::current();
+    span.set_parent(context.unwrap_or_else(opentelemetry::Context::current));
+    let search_start_time = Instant::now();
+
+    // TODO: Replace with actual search logic against a vector database or search engine.
+    // This is a placeholder implementation.
+    tracing::info!("Received search request: {:?}", req);
+
+    // Simulate some processing time
+    // tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let responses = vec![
+        SearchResponse {
+            id: 1,
+            source: format!("Mocked source for query: {}", req.question),
+            similarity: 0.98,
+            ask_method_code: "mock_exact_match".to_string(),
+        },
+        SearchResponse {
+            id: 2,
+            source: "Another mocked source".to_string(),
+            similarity: 0.92,
+            ask_method_code: "mock_semantic_match".to_string(),
+        },
+    ];
+
+    let search_processing_time = search_start_time.elapsed().as_millis();
+    span.record("search_processing_time", &search_processing_time);
+
+    Ok(Json(responses))
+}
+
 /// Prometheus metrics scrape endpoint
 #[utoipa::path(
 get,
@@ -1606,6 +1655,7 @@ pub async fn run(
     paths(
     get_model_info,
     health,
+    search,
     predict,
     rerank,
     embed,
@@ -1660,6 +1710,8 @@ pub async fn run(
     DecodeRequest,
     DecodeResponse,
     ErrorType,
+    SearchQuery,
+    SearchResponse,
     )
     ),
     tags(
@@ -1740,7 +1792,9 @@ pub async fn run(
         .route("/embeddings", post(openai_embed))
         .route("/v1/embeddings", post(openai_embed))
         // Vertex compat route
-        .route("/vertex", post(vertex_compatibility));
+        .route("/vertex", post(vertex_compatibility))
+        // Search route
+        .route("/search", post(search));
 
     #[allow(unused_mut)]
     let mut public_routes = Router::new()

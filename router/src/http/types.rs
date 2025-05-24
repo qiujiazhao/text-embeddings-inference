@@ -590,3 +590,27 @@ pub(crate) enum VertexPrediction {
 pub(crate) struct VertexResponse {
     pub predictions: Vec<VertexPrediction>,
 }
+
+// Search API Types
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub(crate) struct SearchQuery {
+    #[schema(example = "What is the capital of France?")]
+    pub question: String,
+    #[schema(example = "general")]
+    pub industry: String,
+    #[schema(example = 10)]
+    pub top_k: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub(crate) struct SearchResponse {
+    #[schema(example = 1)]
+    pub id: i32,
+    #[schema(example = "Wikipedia article about Paris")]
+    pub source: String,
+    #[schema(example = 0.95)]
+    pub similarity: f32,
+    #[schema(example = "exact_match")]
+    pub ask_method_code: String,
+}
