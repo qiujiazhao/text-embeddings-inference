@@ -4548,6 +4548,7 @@ version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "axum 0.7.9",
  "axum-tracing-opentelemetry",
  "base64 0.22.1",

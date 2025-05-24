@@ -9,6 +9,7 @@ use crate::http::types::{
     TokenizeRequest, TokenizeResponse, TruncationDirection, VertexPrediction, VertexRequest,
     VertexResponse, SearchQuery, SearchResponse,
 };
+use crate::http::search_service::{SearchService, MockSearchProvider, SearchServiceRequest, SearchServiceError};
 use crate::{
     logging, shutdown, ClassifierModel, EmbeddingModel, ErrorResponse, ErrorType, Info, ModelType,
     ResponseMetadata,
@@ -1602,23 +1603,22 @@ async fn search(
     span.set_parent(context.unwrap_or_else(opentelemetry::Context::current));
     let search_start_time = Instant::now();
 
-    // TODO: Replace with actual search logic against a vector database or search engine.
-    // This is a placeholder implementation.
     tracing::info!("Received search request: {:?}", req);
 
-    // --- 开始 Embedding 逻辑 ---
+    // --- Embedding Logic ---
     let embedding_start_time = Instant::now();
+    
+    let permit = infer.try_acquire_permit().map_err(|e: text_embeddings_core::TextEmbeddingsError| {
+        let error_response = crate::ErrorResponse::from(e);
+        let status_code = StatusCode::from(&error_response.error_type);
+        (status_code, Json(error_response))
+    })?;
 
-    // 获取推理许可
-    let permit = infer.try_acquire_permit().map_err(ErrorResponse::from)?;
-
-    // 定义 embedding 参数
     let truncate_param = info.auto_truncate;
     let truncation_direction_param = crate::http::types::TruncationDirection::default();
-    let normalize_param = true; // 通常对于相似性搜索，归一化是推荐的
+    let normalize_param = true;
     let prompt_name_param = None;
 
-    // 执行 embedding
     let embedding_response = infer
         .embed_pooled(
             req.question.clone(),
@@ -1629,7 +1629,11 @@ async fn search(
             permit,
         )
         .await
-        .map_err(ErrorResponse::from)?;
+        .map_err(|e: text_embeddings_core::TextEmbeddingsError| {
+            let error_response = crate::ErrorResponse::from(e);
+            let status_code = StatusCode::from(&error_response.error_type);
+            (status_code, Json(error_response))
+        })?;
 
     let question_embedding: Vec<f32> = embedding_response.results;
     let embedding_time = embedding_start_time.elapsed().as_millis();
@@ -1640,37 +1644,37 @@ async fn search(
         embedding_time,
         question_embedding.len()
     );
-    // --- 结束 Embedding 逻辑 ---
 
-    // TODO: 第二步: 使用 `question_embedding`, `req.industry`, 和 `req.top_k` 
-    // 来查询向量数据库或搜索引擎。
-
-    // 记录实际搜索处理开始时间 (embedding 之后)
+    // --- Search Logic using SearchService ---
     let actual_search_processing_start_time = Instant::now();
+    let search_provider = MockSearchProvider::new();
+    let search_service_request = SearchServiceRequest {
+        question_embedding,
+        industry: req.industry.clone(),
+        top_k: req.top_k,
+        original_question: req.question.clone(),
+    };
 
-    // Simulate some processing time
-    // tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let responses = vec![
-        SearchResponse {
-            id: 1,
-            source: format!("Mocked source for query: {}", req.question),
-            similarity: 0.98,
-            ask_method_code: "mock_exact_match".to_string(),
-        },
-        SearchResponse {
-            id: 2,
-            source: "Another mocked source".to_string(),
-            similarity: 0.92,
-            ask_method_code: "mock_semantic_match".to_string(),
-        },
-    ];
+    let responses = search_provider.search(search_service_request).await
+        .map_err(|search_service_error: SearchServiceError| {
+            tracing::error!("Search service error: {:?}", search_service_error);
+            let (error_type_enum, error_message_str) = match search_service_error {
+                SearchServiceError::ProviderError(msg) => (crate::ErrorType::Backend, msg),
+                SearchServiceError::InternalError(msg) => (crate::ErrorType::Backend, msg),
+            };
+            let status_code = StatusCode::from(&error_type_enum);
+            let error_response_struct = crate::ErrorResponse {
+                error: error_message_str,
+                error_type: error_type_enum,
+            };
+            (status_code, Json(error_response_struct))
+        })?;
 
     let actual_search_processing_time = actual_search_processing_start_time.elapsed().as_millis();
     let total_time = search_start_time.elapsed().as_millis();
 
     span.record("search_processing_time", &actual_search_processing_time);
-    span.record("queue_time", &0u128); // 队列时间仍然是占位符
+    span.record("queue_time", &0u128);
     span.record("total_time", &total_time);
 
     tracing::info!(
@@ -1682,6 +1686,7 @@ async fn search(
 
     Ok(Json(responses))
 }
+
 /// Prometheus metrics scrape endpoint
 #[utoipa::path(
 get,
