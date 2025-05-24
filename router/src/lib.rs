@@ -36,8 +36,7 @@ use tokenizers::processors::sequence::Sequence;
 use tokenizers::processors::template::TemplateProcessing;
 use tokenizers::{PostProcessorWrapper, Tokenizer};
 use tracing::Span;
-use std::sync::Arc;
-use crate::http::search_service::{MockSearchProvider, SearchService};
+use crate::http::search_service::{create_search_service};
 
 
 pub use logging::init_logging;
@@ -68,6 +67,7 @@ pub async fn run(
     otlp_service_name: String,
     prometheus_port: u16,
     cors_allow_origin: Option<Vec<String>>,
+    db_url: Option<String>, 
 ) -> Result<()> {
     let model_id_path = Path::new(&model_id);
     let (model_root, api_repo) = if model_id_path.exists() && model_id_path.is_dir() {
@@ -329,7 +329,7 @@ pub async fn run(
 
     #[cfg(feature = "http")]
     {
-        let search_service: Arc<dyn SearchService> = Arc::new(MockSearchProvider::new());
+        let search_service = create_search_service(db_url.clone());
         http::server::run(
             infer,
             info,

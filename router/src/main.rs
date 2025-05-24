@@ -171,6 +171,10 @@ struct Args {
     /// Unused for gRPC servers
     #[clap(long, env)]
     cors_allow_origin: Option<Vec<String>>,
+
+    /// vector database url
+    #[clap(long, env)]
+    db_url: Option<String>,
 }
 
 #[tokio::main]
@@ -233,6 +237,7 @@ async fn main() -> Result<()> {
         args.otlp_service_name,
         args.prometheus_port,
         args.cors_allow_origin,
+        args.db_url,
     )
     .await?;
 
