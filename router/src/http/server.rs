@@ -1591,8 +1591,10 @@ responses(
 (status = 500, description = "Internal Server Error", body = ErrorResponse, example = json!({"error": "An unexpected error occurred during search", "error_type": "backend"}))
 )
 )]
-#[instrument(skip_all, fields(total_time, queue_time, search_processing_time))]
+#[instrument(skip_all, fields(total_time, queue_time, search_processing_time, embedding_time))]
 async fn search(
+    infer: Extension<Infer>,
+    info: Extension<Info>,
     Extension(context): Extension<Option<opentelemetry::Context>>,
     Json(req): Json<SearchQuery>,
 ) -> Result<Json<Vec<SearchResponse>>, (StatusCode, Json<ErrorResponse>)> {
@@ -1603,6 +1605,48 @@ async fn search(
     // TODO: Replace with actual search logic against a vector database or search engine.
     // This is a placeholder implementation.
     tracing::info!("Received search request: {:?}", req);
+
+    // --- 开始 Embedding 逻辑 ---
+    let embedding_start_time = Instant::now();
+
+    // 获取推理许可
+    let permit = infer.try_acquire_permit().map_err(ErrorResponse::from)?;
+
+    // 定义 embedding 参数
+    let truncate_param = info.auto_truncate;
+    let truncation_direction_param = crate::http::types::TruncationDirection::default();
+    let normalize_param = true; // 通常对于相似性搜索，归一化是推荐的
+    let prompt_name_param = None;
+
+    // 执行 embedding
+    let embedding_response = infer
+        .embed_pooled(
+            req.question.clone(),
+            truncate_param,
+            truncation_direction_param.into(),
+            prompt_name_param,
+            normalize_param,
+            permit,
+        )
+        .await
+        .map_err(ErrorResponse::from)?;
+
+    let question_embedding: Vec<f32> = embedding_response.results;
+    let embedding_time = embedding_start_time.elapsed().as_millis();
+    span.record("embedding_time", &embedding_time);
+
+    tracing::info!(
+        "Question embedded successfully in {}ms. Embedding vector dimension: {}",
+        embedding_time,
+        question_embedding.len()
+    );
+    // --- 结束 Embedding 逻辑 ---
+
+    // TODO: 第二步: 使用 `question_embedding`, `req.industry`, 和 `req.top_k` 
+    // 来查询向量数据库或搜索引擎。
+
+    // 记录实际搜索处理开始时间 (embedding 之后)
+    let actual_search_processing_start_time = Instant::now();
 
     // Simulate some processing time
     // tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1622,12 +1666,22 @@ async fn search(
         },
     ];
 
-    let search_processing_time = search_start_time.elapsed().as_millis();
-    span.record("search_processing_time", &search_processing_time);
+    let actual_search_processing_time = actual_search_processing_start_time.elapsed().as_millis();
+    let total_time = search_start_time.elapsed().as_millis();
+
+    span.record("search_processing_time", &actual_search_processing_time);
+    span.record("queue_time", &0u128); // 队列时间仍然是占位符
+    span.record("total_time", &total_time);
+
+    tracing::info!(
+        "Search completed in {}ms (Embedding: {}ms, Processing: {}ms, Queue: 0ms)",
+        total_time,
+        embedding_time,
+        actual_search_processing_time
+    );
 
     Ok(Json(responses))
 }
-
 /// Prometheus metrics scrape endpoint
 #[utoipa::path(
 get,
