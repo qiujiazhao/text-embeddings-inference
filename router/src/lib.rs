@@ -36,6 +36,9 @@ use tokenizers::processors::sequence::Sequence;
 use tokenizers::processors::template::TemplateProcessing;
 use tokenizers::{PostProcessorWrapper, Tokenizer};
 use tracing::Span;
+use std::sync::Arc;
+use crate::http::search_service::{MockSearchProvider, SearchService};
+
 
 pub use logging::init_logging;
 
@@ -326,6 +329,7 @@ pub async fn run(
 
     #[cfg(feature = "http")]
     {
+        let search_service: Arc<dyn SearchService> = Arc::new(MockSearchProvider::new());
         http::server::run(
             infer,
             info,
@@ -334,6 +338,7 @@ pub async fn run(
             payload_limit,
             api_key,
             cors_allow_origin,
+            search_service,
         )
         .await
     }

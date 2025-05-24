@@ -9,7 +9,7 @@ use crate::http::types::{
     TokenizeRequest, TokenizeResponse, TruncationDirection, VertexPrediction, VertexRequest,
     VertexResponse, SearchQuery, SearchResponse,
 };
-use crate::http::search_service::{SearchService, MockSearchProvider, SearchServiceRequest, SearchServiceError};
+use crate::http::search_service::{SearchService, SearchServiceRequest, SearchServiceError};
 use crate::{
     logging, shutdown, ClassifierModel, EmbeddingModel, ErrorResponse, ErrorType, Info, ModelType,
     ResponseMetadata,
@@ -30,6 +30,7 @@ use http::header::AUTHORIZATION;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use simsimd::SpatialSimilarity;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use text_embeddings_backend::BackendError;
 use text_embeddings_core::infer::{
@@ -1597,6 +1598,7 @@ async fn search(
     infer: Extension<Infer>,
     info: Extension<Info>,
     Extension(context): Extension<Option<opentelemetry::Context>>,
+    Extension(search_service): Extension<Arc<dyn SearchService>>,
     Json(req): Json<SearchQuery>,
 ) -> Result<Json<Vec<SearchResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let span = tracing::Span::current();
@@ -1647,7 +1649,6 @@ async fn search(
 
     // --- Search Logic using SearchService ---
     let actual_search_processing_start_time = Instant::now();
-    let search_provider = MockSearchProvider::new();
     let search_service_request = SearchServiceRequest {
         question_embedding,
         industry: req.industry.clone(),
@@ -1655,7 +1656,7 @@ async fn search(
         original_question: req.question.clone(),
     };
 
-    let responses = search_provider.search(search_service_request).await
+    let responses = search_service.search(search_service_request).await
         .map_err(|search_service_error: SearchServiceError| {
             tracing::error!("Search service error: {:?}", search_service_error);
             let (error_type_enum, error_message_str) = match search_service_error {
@@ -1707,6 +1708,7 @@ pub async fn run(
     payload_limit: usize,
     api_key: Option<String>,
     cors_allow_origin: Option<Vec<String>>,
+    search_service: Arc<dyn SearchService>, // <--- Add this parameter
 ) -> Result<(), anyhow::Error> {
     // OpenAPI documentation
     #[derive(OpenApi)]
@@ -1944,6 +1946,7 @@ pub async fn run(
         .merge(public_routes)
         .layer(Extension(infer))
         .layer(Extension(info))
+        .layer(Extension(search_service)) // <--- Pass search_service as a parameter
         .layer(Extension(prom_handle.clone()))
         .layer(OtelAxumLayer::default())
         .layer(axum::middleware::from_fn(

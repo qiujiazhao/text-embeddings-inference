@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use crate::http::types::SearchResponse; // Adjust path if SearchResponse is elsewhere
 use super::search_trait::{SearchService, SearchServiceError, SearchServiceRequest};
 
+#[derive(Clone)]
 pub struct MockSearchProvider;
 
 impl MockSearchProvider {
@@ -13,6 +14,19 @@ impl MockSearchProvider {
 #[async_trait]
 impl SearchService for MockSearchProvider {
     async fn search(&self, request: SearchServiceRequest) -> Result<Vec<SearchResponse>, SearchServiceError> {
+        // Simulate error conditions based on the input question for demonstration
+        if request.original_question.contains("error_provider") {
+            return Err(SearchServiceError::ProviderError(
+                "Mock provider error triggered by input.".to_string(),
+            ));
+        }
+
+        if request.original_question.contains("error_internal") {
+            return Err(SearchServiceError::InternalError(
+                "Mock internal error triggered by input.".to_string(),
+            ));
+        }
+
         // TODO: 第二步: 使用 `request.question_embedding`, `request.industry`, 和 `request.top_k` 
         // 来查询向量数据库或搜索引擎。
         // 这是从 server.rs 迁移过来的 TODO。
