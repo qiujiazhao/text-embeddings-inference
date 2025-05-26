@@ -19,7 +19,14 @@ pub struct SearchServiceRequest {
     pub top_k: i32,
 }
 
-#[derive(Error, Debug, Clone, Serialize, Deserialize, ToSchema)] // Added ToSchema here as well for consistency
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub enum SearchProviderType {
+    Mock,
+    LanceDB,
+    // Add other provider types here, e.g., Qdrant, etc.
+}
+
+#[derive(Error, Debug, Clone, Serialize, Deserialize, ToSchema)] 
 pub enum SearchServiceError {
     #[error("Database error: {0}")]
     DatabaseError(String),

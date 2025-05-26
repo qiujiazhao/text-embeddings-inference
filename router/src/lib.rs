@@ -37,6 +37,7 @@ use tokenizers::processors::template::TemplateProcessing;
 use tokenizers::{PostProcessorWrapper, Tokenizer};
 use tracing::Span;
 use search::factory::create_search_service;
+use search::types::SearchProviderType;
 
 /// Initialize logging
 pub use logging::init_logging;
@@ -329,7 +330,7 @@ pub async fn run(
 
     #[cfg(feature = "http")]
     {
-        let search_service = create_search_service(db_url.clone());
+        let search_service = create_search_service(SearchProviderType::LanceDB, db_url.clone()).await?;
         http::server::run(
             infer,
             info,

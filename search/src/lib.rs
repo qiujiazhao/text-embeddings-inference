@@ -1,6 +1,7 @@
 pub mod factory;
 pub mod search_provider;
 pub mod search_trait;
+pub mod lancedb_provider;
 pub mod types;
 
 // Re-export the public APIs
