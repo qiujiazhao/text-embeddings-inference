@@ -1,6 +1,6 @@
 // TODO: Adjust this import. SearchResponse might need to be moved or accessed differently.
 use async_trait::async_trait;
-use crate::types::{SearchResponse, SearchServiceRequest, SearchServiceError};
+pub use crate::types::{SearchResponse, SearchServiceRequest, SearchServiceError};
 
 #[async_trait]
 pub trait SearchService: Send + Sync {

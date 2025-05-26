@@ -1,229 +1,254 @@
-use crate::search_trait::{SearchService, SearchServiceError, SearchServiceRequest, SearchResponse};
-use async_trait::async_trait;
-use lancedb::{
-    connect,
-    schema::Schema as LanceSchema,
-    table::AddDataOptions,
-    Connection,
-    Table
+// search/src/lancedb_provider.rs (New Content)
+use crate::search_trait::{SearchService, SearchServiceError, SearchServiceRequest, SearchResponse as ServiceSearchResponse};
+use crate::{
+    init_search_engine_ffi, perform_search_ffi, free_search_response_ffi, shutdown_search_engine_ffi,
 };
-use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-use arrow_array::{Float32Array, RecordBatch, StringArray, Int64Array, types::Float32Type, FixedSizeListArray};
-use std::sync::Arc;
+#[allow(unused_imports)]
+use search_ffi_types::{SearchResultItemFfi}; // Keep only SearchResultItemFfi or other specific types if directly used without module prefix
+use async_trait::async_trait;
+use serde::Deserialize;
+use std::ffi::{CStr, CString};
+// use std::os::raw::c_char; // Not directly needed here as it's part of FFI types
+use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::task;
+use tracing::{debug, error, info, warn};
 
-const DEFAULT_VECTOR_FIELD_NAME: &str = "vector";
-const DEFAULT_ID_FIELD_NAME: &str = "id";
-const DEFAULT_SOURCE_FIELD_NAME: &str = "source";
-const DEFAULT_ASK_METHOD_CODE_FIELD_NAME: &str = "ask_method_code";
-
-pub struct LanceDbSearchProvider {
-    conn: Connection,
-    table_name: String,
-    // We might need embedding_dim if we are creating the table or validating
-    // embedding_dim: usize,
+// Helper struct to deserialize metadata_json from FFI
+#[derive(Deserialize, Debug)]
+struct FfiMetadata {
+    source: String,
+    ask_method_code: String,
+    // Add other fields if they exist in metadata_json
 }
 
-impl LanceDbSearchProvider {
-    pub async fn new(
-        db_uri: &str,
-        table_name: &str,
-        embedding_dim: usize,
-    ) -> Result<Self, SearchServiceError> {
-        let conn = connect(db_uri)
-            .execute()
-            .await
-            .map_err(|e| SearchServiceError::ExternalServiceError(format!("Failed to connect to LanceDB: {}", e)))?;
+pub struct LanceDbFfiSearchProvider {
+    initialized: AtomicBool,
+    table_name: String,
+}
 
-        let table_names = conn
-            .table_names()
-            .await
-            .map_err(|e| SearchServiceError::ExternalServiceError(format!("Failed to list tables: {}", e)))?;
+impl LanceDbFfiSearchProvider {
+    pub async fn new(db_uri: &str, table_name: &str) -> Result<Self, SearchServiceError> {
+        let db_uri_owned = db_uri.to_string();
+        let self_table_name = table_name.to_string(); // For self.table_name
+        let closure_table_name = table_name.to_string(); // For the closure
+        // For logging outside spawn_blocking if needed, capture original values or construct string here
+        let log_config_str = format!("db_path: {}, table_name: {}", db_uri, table_name);
 
-        if !table_names.iter().any(|name| name == table_name) {
-            // Table does not exist, create it
-            let schema = Arc::new(ArrowSchema::new(vec![
-                Field::new(DEFAULT_ID_FIELD_NAME, DataType::Int64, false),
-                Field::new(
-                    DEFAULT_VECTOR_FIELD_NAME,
-                    DataType::FixedSizeList(
-                        Arc::new(Field::new("item", DataType::Float32, true)),
-                        embedding_dim as i32,
-                    ),
-                    true,
-                ),
-                Field::new(DEFAULT_SOURCE_FIELD_NAME, DataType::Utf8, true),
-                Field::new(DEFAULT_ASK_METHOD_CODE_FIELD_NAME, DataType::Utf8, true),
-            ]));
-
-            // Create an empty RecordBatch to define the schema for lancedb
-            let empty_batch = RecordBatch::new_empty(schema.clone());
-            
-            conn.create_table(table_name, Box::new(vec![empty_batch]))
-                .await
-                .map_err(|e| {
-                    SearchServiceError::ExternalServiceError(format!("Failed to create table '{}': {}", table_name, e))
-                })?;
-            tracing::info!("Created LanceDB table '{}' with embedding dimension {}", table_name, embedding_dim);
-            
-            // Temporarily add some test data if the table was just created
-            let temp_self_for_add = Self {
-                conn: conn.clone(), // Clone connection for this temporary operation
-                table_name: table_name.to_string(),
+        let init_result = task::spawn_blocking(move || {
+            let config = serde_json::json!({
+                "db_uri": db_uri_owned,
+                "table_name": closure_table_name,
+            });
+            let config_json_string_inner = config.to_string();
+            let c_config_json = match CString::new(config_json_string_inner) {
+                Ok(c) => c,
+                Err(e) => return Err(SearchServiceError::InternalError(format!("Failed to create CString for config: {}", e))),
             };
-            temp_self_for_add.add_data(
-                1,
-                vec![0.1; embedding_dim], // vector of 0.1s
-                "Source A - Item 1",
-                "ASK_CODE_001"
-            ).await.map_err(|e| SearchServiceError::InternalError(format!("Failed to add test data 1: {}", e)))?;
-            
-            temp_self_for_add.add_data(
-                2,
-                vec![0.5; embedding_dim], // vector of 0.5s
-                "Source B - Item 2",
-                "ASK_CODE_002"
-            ).await.map_err(|e| SearchServiceError::InternalError(format!("Failed to add test data 2: {}", e)))?;
-
-            temp_self_for_add.add_data(
-                3,
-                vec![0.9; embedding_dim], // vector of 0.9s
-                "Source C - Item 3",
-                "ASK_CODE_003"
-            ).await.map_err(|e| SearchServiceError::InternalError(format!("Failed to add test data 3: {}", e)))?;
-            tracing::info!("Added temporary test data to table '{}'", table_name);
-
-        } else {
-            tracing::info!("Opened existing LanceDB table '{}'", table_name);
-        }
-
-        Ok(Self {
-            conn,
-            table_name: table_name.to_string(),
-            // embedding_dim,
+            let result_code = unsafe { init_search_engine_ffi(c_config_json.as_ptr()) };
+            Ok(result_code)
         })
+        .await
+        .map_err(|e| SearchServiceError::InternalError(format!("Task for FFI init panicked: {}", e)))??; // Note: double unwrap for Result<Result<_,_>, JoinError>
+
+        match init_result {
+            search_ffi_types::FfiResultCode::Success => {
+                info!("LanceDB FFI search engine initialized successfully with config: {}", log_config_str);
+                Ok(Self {
+                    initialized: AtomicBool::new(true),
+                    table_name: self_table_name,
+                })
+            }
+            _ => {
+                let err_msg = format!(
+                    "Failed to initialize LanceDB FFI search engine (code: {:?}). Config: {}",
+                    init_result, log_config_str
+                );
+                error!("{}", err_msg);
+                Err(SearchServiceError::ExternalServiceError(err_msg))
+            }
+        }
     }
 
-    // Placeholder for a method to add data
-    pub async fn add_data(&self, id: i64, vector: Vec<f32>, source: &str, ask_method_code: &str) -> Result<(), SearchServiceError> {
-        let table = self.conn.open_table(&self.table_name)
-            .await
-            .map_err(|e| SearchServiceError::ExternalServiceError(format!("Failed to open table '{}': {}", self.table_name, e)))?;
+    // This function is already static-like in its signature, no change needed to its definition
+    fn convert_ffi_response(
+        ffi_response: &search_ffi_types::SearchResponseFfi,
+    ) -> Result<Vec<ServiceSearchResponse>, SearchServiceError> {
+        let mut service_responses = Vec::new();
+        if ffi_response.results.is_null() {
+            if ffi_response.num_results > 0 {
+                return Err(SearchServiceError::InternalError(
+                    "FFI response has non-zero num_results but null results_ptr.".to_string(),
+                ));
+            }
+            // No results, but not an error state by itself.
+            return Ok(service_responses);
+        }
 
-        let schema = table.schema().await.map_err(|e| SearchServiceError::ExternalServiceError(format!("Failed to get schema: {}",e)))?;
-        let arrow_schema: Arc<ArrowSchema> = Arc::new(schema.try_into().map_err(|e: lancedb::error::Error| SearchServiceError::Unknown(format!("Could not convert LanceSchema to ArrowSchema: {}", e)))?);
-        
-        let ids = Int64Array::from(vec![id]);
-        let vectors = Float32Array::from(vector);
-        let sources = StringArray::from(vec![source]);
-        let ask_method_codes = StringArray::from(vec![ask_method_code]);
+        let results_slice = unsafe {
+            std::slice::from_raw_parts(ffi_response.results, ffi_response.num_results)
+        };
 
-        // We need to ensure the vector is correctly wrapped for FixedSizeList
-        // This part is tricky and might need adjustment based on how lancedb expects FixedSizeList data.
-        // For now, creating a RecordBatch with a simple Float32Array for the vector part might not directly work
-        // if the table schema expects a FixedSizeList. LanceDB's `add_data` might handle this conversion, or we might need to structure it differently.
-        // The `openai.rs` example uses `add_embedding` which handles this. Here we are trying to add raw vectors.
+        for ffi_item in results_slice {
+            let id_str = unsafe {
+                if ffi_item.id.is_null() {
+                    return Err(SearchServiceError::InternalError("FFI item ID is null".to_string()));
+                }
+                CStr::from_ptr(ffi_item.id).to_str().map_err(|e| {
+                    SearchServiceError::InternalError(format!("Invalid UTF-8 for FFI item ID: {}", e))
+                })?
+            };
+            let id = id_str.to_string();
 
-        // This is a simplified attempt, actual construction of RecordBatch for FixedSizeList needs care.
-        // Let's assume for now that we can create a flat Float32Array and lancedb handles it, or we'll refine this.
-        // A more robust way would be to construct the FixedSizeListArray directly.
-        let batch = RecordBatch::try_new(
-            arrow_schema.clone(), // Use the table's actual schema
-            vec![
-                Arc::new(ids),
-                // Construct FixedSizeListArray for the vector
-                Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                    vec![Some(vector)], // Each item in the outer vec is one list/vector
-                    arrow_schema.field_with_name(DEFAULT_VECTOR_FIELD_NAME).unwrap().data_type().clone().try_into().unwrap() // Get the FixedSizeList DataType
-                ).map_err(|e| SearchServiceError::InternalError(format!("Failed to create FixedSizeListArray for vector: {}", e)))?),
-                Arc::new(sources),
-                Arc::new(ask_method_codes),
-            ],
-        ).map_err(|e| SearchServiceError::InternalError(format!("Failed to create RecordBatch: {}", e)))?;
+            let metadata_json_str = unsafe {
+                if ffi_item.metadata_json.is_null() {
+                     // Assuming metadata might be optional or not always present
+                    warn!("FFI item metadata_json is null for ID: {}", id_str);
+                    // Provide an empty JSON object string to avoid erroring out if metadata is optional
+                    // and FfiMetadata expects fields that might not be there.
+                    // Alternatively, FfiMetadata fields could be Option<String>.
+                    "{\"source\": \"\", \"ask_method_code\": \"\"}" 
+                } else {
+                    CStr::from_ptr(ffi_item.metadata_json).to_str().map_err(|e| {
+                        SearchServiceError::InternalError(format!("Invalid UTF-8 for FFI item metadata_json: {}", e))
+                    })?
+                }
+            };
+            
+            let metadata: FfiMetadata = serde_json::from_str(metadata_json_str).map_err(|e| {
+                SearchServiceError::InternalError(format!(
+                    "Failed to parse FFI item metadata_json for ID '{}': {}, json: '{}'",
+                    id_str, e, metadata_json_str
+                ))
+            })?;
 
-        table.add(Box::new(vec![batch]), None).await.map_err(|e| SearchServiceError::ExternalServiceError(format!("Failed to add data: {}", e)))?;
-        Ok(())
+            service_responses.push(ServiceSearchResponse {
+                id,
+                source: metadata.source,
+                similarity: ffi_item.score,
+                ask_method_code: metadata.ask_method_code,
+            });
+        }
+        Ok(service_responses)
     }
 }
 
 #[async_trait]
-impl SearchService for LanceDbSearchProvider {
+impl SearchService for LanceDbFfiSearchProvider {
     async fn search(
         &self,
         request: SearchServiceRequest,
-    ) -> Result<Vec<SearchResponse>, SearchServiceError> {
-        let table = self.conn.open_table(&self.table_name)
-            .await
-            .map_err(|e| SearchServiceError::ExternalServiceError(format!("Failed to open table '{}': {}", self.table_name, e)))?;
-
-        // Convert Vec<f32> to Float32Array for LanceDB
-        let query_vector_data = Float32Array::from(request.question_embedding);
-        
-        let results = table
-            .search(query_vector_data)
-            .limit(request.top_k as usize)
-            .execute_stream()
-            .await
-            .map_err(|e| SearchServiceError::ExternalServiceError(format!("Search failed: {}", e)))?;
-        
-        let record_batches: Vec<RecordBatch> = results
-            .collect::<Vec<lancedb::error::Result<RecordBatch>>>()
-            .await
-            .into_iter()
-            .map(|rb_result| rb_result.map_err(|e| SearchServiceError::ExternalServiceError(format!("Failed to collect search result batch: {}", e))))
-            .collect::<Result<Vec<RecordBatch>, SearchServiceError>>()?;
-
-        let mut search_responses = Vec::new();
-
-        for batch in record_batches {
-            let ids = batch
-                .column_by_name(DEFAULT_ID_FIELD_NAME)
-                .ok_or_else(|| SearchServiceError::InternalError(format!("Missing '{}' column in search result", DEFAULT_ID_FIELD_NAME)))?
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| SearchServiceError::InternalError(format!("Failed to downcast '{}' column", DEFAULT_ID_FIELD_NAME)))?;
-            
-            let sources = batch
-                .column_by_name(DEFAULT_SOURCE_FIELD_NAME)
-                .ok_or_else(|| SearchServiceError::InternalError(format!("Missing '{}' column in search result", DEFAULT_SOURCE_FIELD_NAME)))?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| SearchServiceError::InternalError(format!("Failed to downcast '{}' column", DEFAULT_SOURCE_FIELD_NAME)))?;
-
-            let ask_method_codes = batch
-                .column_by_name(DEFAULT_ASK_METHOD_CODE_FIELD_NAME)
-                .ok_or_else(|| SearchServiceError::InternalError(format!("Missing '{}' column in search result", DEFAULT_ASK_METHOD_CODE_FIELD_NAME)))?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| SearchServiceError::InternalError(format!("Failed to downcast '{}' column", DEFAULT_ASK_METHOD_CODE_FIELD_NAME)))?;
-            
-            // LanceDB search results often include a '_distance' column for similarity/distance.
-            // We need to extract this and map it to `similarity`.
-            let distances = batch
-                .column_by_name("_distance") // Default distance column name
-                .ok_or_else(|| SearchServiceError::InternalError("Missing '_distance' column in search result".to_string()))?
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| SearchServiceError::InternalError("Failed to downcast '_distance' column".to_string()))?;
-
-            for i in 0..ids.len() {
-                // LanceDB distances are often L2, smaller is better. Similarity is often 0-1, larger is better.
-                // A simple conversion could be 1.0 / (1.0 + distance), or 1.0 - distance if distance is normalized.
-                // This needs to be adjusted based on the actual distance metric used by LanceDB and desired similarity range.
-                // For now, let's assume a simple inverse relationship for demonstration.
-                let similarity_score = 1.0 / (1.0 + distances.value(i)); 
-
-                search_responses.push(SearchResponse {
-                    id: ids.value(i),
-                    source: sources.value(i).to_string(),
-                    similarity: similarity_score,
-                    ask_method_code: ask_method_codes.value(i).to_string(),
-                });
-            }
+    ) -> Result<Vec<ServiceSearchResponse>, SearchServiceError> {
+        if !self.initialized.load(Ordering::SeqCst) {
+            return Err(SearchServiceError::ExternalServiceError(
+                "LanceDB FFI provider not initialized or initialization failed.".to_string(),
+            ));
         }
-        
-        // Ensure we don't return more than top_k results, though .limit() should handle this.
-        search_responses.truncate(request.top_k as usize);
 
-        Ok(search_responses)
+        let mut embedding_vec = request.question_embedding; // Take ownership
+        let top_k = request.top_k;
+        let table_name_for_closure = self.table_name.clone(); // Clone for the closure
+
+        task::spawn_blocking(move || {
+            embedding_vec.shrink_to_fit(); // Good practice
+
+            // Need to ensure self.table_name is available for CString creation
+            // If self is moved into the closure, this is fine. If not, table_name needs to be cloned.
+            // Assuming self is moved or table_name is cloned appropriately before this closure.
+            let c_table_name = match CString::new(table_name_for_closure.as_str()) {
+                Ok(s) => s,
+                Err(e) => return Err(SearchServiceError::InternalError(format!("Failed to create CString for table_name: {}", e))),
+            };
+
+            let ffi_request = search_ffi_types::SearchRequestFfi {
+                embedding_ptr: embedding_vec.as_ptr(),
+                embedding_dim: embedding_vec.len() as u32,
+                top_k: top_k as u32,
+                table_name: c_table_name.as_ptr(),
+                // filters_json: ptr::null(), // If filters were supported
+            };
+
+            let ffi_request_ptr = &ffi_request as *const search_ffi_types::SearchRequestFfi;
+            // This will hold the pointer to the FFI-allocated SearchResponseFfi
+            let mut ffi_response_raw_ptr: *mut search_ffi_types::SearchResponseFfi = ptr::null_mut(); 
+
+            // Call FFI, passing the address of our raw pointer
+            let result_code = unsafe { perform_search_ffi(ffi_request_ptr, &mut ffi_response_raw_ptr) };
+            
+            // `embedding_vec` is owned by this closure and its lifetime is managed correctly.
+            // `c_table_name` (CString) is also owned and its pointer is valid for the FFI call.
+
+            match result_code {
+                search_ffi_types::FfiResultCode::Success => {
+                    if ffi_response_raw_ptr.is_null() {
+                        // This case should ideally not happen if FFI returns Success
+                        error!("FFI search returned Success but response pointer is null.");
+                        return Err(SearchServiceError::ExternalServiceError(
+                            "FFI search succeeded but returned a null response.".to_string(),
+                        ));
+                    }
+                    // Safely dereference the raw pointer to get a reference
+                    let ffi_response = unsafe { &*ffi_response_raw_ptr };
+                    debug!("FFI search successful. num_results: {}", ffi_response.num_results);
+                    
+                    let conversion_result = LanceDbFfiSearchProvider::convert_ffi_response(ffi_response);
+                    
+                    // IMPORTANT: Free the FFI-allocated SearchResponseFfi structure
+                    unsafe {
+                        free_search_response_ffi(ffi_response_raw_ptr);
+                    }
+                    conversion_result // This is Result<Vec<ServiceSearchResponse>, SearchServiceError>
+                }
+                _ => { // Handles all other FfiResultCode variants as errors
+                    let mut error_message_str = format!("FFI search failed with code: {:?}", result_code);
+                    // Try to get a more specific error message from the FFI response if the pointer is valid
+                    // (even on error, FFI might populate error_message)
+                    if !ffi_response_raw_ptr.is_null() {
+                        let ffi_response_on_error = unsafe { &*ffi_response_raw_ptr };
+                        if !ffi_response_on_error.error_message.is_null() {
+                            unsafe {
+                                match CStr::from_ptr(ffi_response_on_error.error_message).to_str() {
+                                    Ok(ffi_err_msg) => {
+                                        error_message_str.push_str(&format!(" FFI Error: {}", ffi_err_msg));
+                                    }
+                                    Err(e) => {
+                                        error_message_str.push_str(&format!(" FFI Error message unreadable: {}", e));
+                                    }
+                                }
+                                // Assuming free_search_response_ffi handles freeing error_message if present.
+                            }
+                        }
+                        // IMPORTANT: Free the FFI-allocated SearchResponseFfi structure even on error, if it was allocated.
+                        unsafe {
+                            free_search_response_ffi(ffi_response_raw_ptr);
+                        }
+                    }
+                    error!("{}", error_message_str);
+                    Err(SearchServiceError::ExternalServiceError(error_message_str))
+                }
+            }
+        })
+        .await
+        .map_err(|e| SearchServiceError::InternalError(format!("Task for FFI search panicked: {}", e)))?
+        // The final '?' unwraps the Result from the closure itself.
+    }
+}
+
+impl Drop for LanceDbFfiSearchProvider {
+    fn drop(&mut self) {
+        if self.initialized.load(Ordering::SeqCst) {
+            info!("Shutting down LanceDB FFI search engine...");
+            // This is a blocking call in drop, which is generally okay.
+            // If shutdown_search_engine_ffi could panic, it's more problematic.
+            let result_code = unsafe { shutdown_search_engine_ffi() };
+            match result_code {
+                search_ffi_types::FfiResultCode::Success => info!("LanceDB FFI search engine shut down successfully."),
+                _ => error!(
+                    "Failed to shut down LanceDB FFI search engine (code: {:?})",
+                    result_code
+                ),
+            }
+            self.initialized.store(false, Ordering::SeqCst);
+        }
     }
 }

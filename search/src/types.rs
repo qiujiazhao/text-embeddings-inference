@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SearchResponse {
-    pub id: i32,
+    pub id: String,
     pub source: String,
     pub similarity: f32,
     pub ask_method_code: String,
@@ -38,4 +38,6 @@ pub enum SearchServiceError {
     NotFound(String),
     #[error("Unknown error: {0}")]
     Unknown(String),
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }

@@ -45,13 +45,13 @@ impl SearchService for MockSearchProvider {
 
         let responses = vec![
             SearchResponse {
-                id: 1,
+                id: "1".to_string(),
                 source: format!("Mocked source for search_param: '{}' (db_url: {:?})", request.search_param, self.db_url),
                 similarity: 0.98,
                 ask_method_code: "mock_exact_match".to_string(),
             },
             SearchResponse {
-                id: 2,
+                id: "2".to_string(),
                 source: "Another mocked source".to_string(),
                 similarity: 0.92,
                 ask_method_code: "mock_semantic_match".to_string(),

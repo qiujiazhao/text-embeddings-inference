@@ -1,0 +1,25 @@
+[workspace]
+
+
+[package]
+name = "lancedb_ffi"
+version = "0.1.0"
+edition = "2021"
+
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+search_ffi_types = { path = "../search_ffi_types" }
+lancedb = "0.19.1"
+once_cell = "1.19"
+futures = "0.3"
+arrow-array = "54.1"
+arrow-schema = "54.1" # Match arrow-array version
+tokio = { version = "1.35", features = ["full"] } # LanceDB might require a tokio runtime
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

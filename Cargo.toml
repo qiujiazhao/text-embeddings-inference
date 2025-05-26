@@ -7,7 +7,7 @@ members = [
     "backends/python",
     "backends/grpc-client",
     "core",
-    "router", "search", # Was search_service_logic, directory will be renamed next
+    "router", "search", "search_ffi_types" # Was search_service_logic, directory will be renamed next
 ]
 default-members = [
     "backends",
@@ -62,7 +62,7 @@ candle-flash-attn = { git = "https://github.com/huggingface/candle", rev = "6381
 
 [profile.release]
 debug = 0
-lto = "fat"
+lto = false
 opt-level = 3
 codegen-units = 1
 strip = "symbols"

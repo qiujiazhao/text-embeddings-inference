@@ -1665,6 +1665,7 @@ async fn search(
                 SearchServiceError::ValidationError(msg) => (crate::ErrorType::Validation, msg), // Or Backend, depending on desired HTTP status
                 SearchServiceError::ExternalServiceError(msg) => (crate::ErrorType::Backend, msg),
                 SearchServiceError::NotFound(msg) => (crate::ErrorType::NotFound, msg),
+                SearchServiceError::InternalError(msg) => (crate::ErrorType::Backend, msg), // Added this line
                 SearchServiceError::Unknown(msg) => (crate::ErrorType::Backend, msg),
             };
             let status_code = StatusCode::from(&error_type_enum);

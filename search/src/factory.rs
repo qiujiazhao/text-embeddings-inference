@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::lancedb_provider::LanceDbSearchProvider;
+use super::lancedb_provider::LanceDbFfiSearchProvider;
 use super::search_provider::MockSearchProvider;
 use super::search_trait::{SearchService, SearchServiceError};
 use super::types::SearchProviderType;
@@ -15,20 +15,17 @@ pub async fn create_search_service(
             Ok(Arc::new(MockSearchProvider::new(db_url)))
         }
         SearchProviderType::LanceDB => {
-            // For LanceDB, db_url from argument might be used or a specific config for URI
-            // For now, hardcoding URI, table name, and embedding dimension
-            let db_uri = "./lance_db_data"; // Example local directory
-            let table_name = "vector_table";
-            let embedding_dim = 1536; // Example dimension (e.g., OpenAI ada-002)
+            // Use db_url from argument if provided, otherwise default.
+            let db_uri = db_url.unwrap_or_else(|| "./lance_db_data".to_string());
+            let table_name = "P-clothing"; // This could also come from configuration
 
             tracing::info!(
-                "Creating LanceDbSearchProvider with URI: '{}', Table: '{}', Dim: {}",
+                "Creating LanceDbFfiSearchProvider with URI: '{}', Table: '{}'",
                 db_uri,
-                table_name,
-                embedding_dim
+                table_name
             );
             
-            let provider = LanceDbSearchProvider::new(db_uri, table_name, embedding_dim).await?;
+            let provider = LanceDbFfiSearchProvider::new(&db_uri, table_name).await?;
             Ok(Arc::new(provider))
         }
         // Add other providers here
