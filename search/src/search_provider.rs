@@ -33,14 +33,16 @@ impl SearchService for MockSearchProvider {
             ));
         }
 
+        let embedding_preview_len = std::cmp::min(3, request.question_embedding.len());
+        let embedding_preview = request.question_embedding.iter().take(3).collect::<Vec<_>>();
+
         tracing::info!(
-            "MockSearchProvider: Simulating search for industry '{}', solution_archetype '{}', search_param '{}', top_k '{}'. Embedding (first {} dims): {:?}",
-            request.industry,
-            request.solution_archetype,
+            "MockSearchProvider: Simulating search for table_name '{}', search_param '{}', top_k '{}'. Embedding (first {} dims): {:?}",
+            request.table_name,
             request.search_param,
             request.top_k,
-            std::cmp::min(3, request.question_embedding.len()),
-            request.question_embedding.iter().take(3).collect::<Vec<_>>()
+            embedding_preview_len,
+            embedding_preview
         );
 
         let responses = vec![

@@ -13,8 +13,8 @@ pub struct SearchResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SearchServiceRequest {
     pub question_embedding: Vec<f32>,
-    pub industry: String,
-    pub solution_archetype: String,
+    pub table_name: String, // Renamed from industry
+    // solution_archetype has been removed
     pub search_param: String,
     pub top_k: i32,
 }

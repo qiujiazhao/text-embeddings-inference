@@ -20,7 +20,6 @@ use lancedb::query::ExecutableQuery;
 #[derive(Deserialize, Debug)]
 struct InitConfig {
     db_uri: String,
-    // table_name: Option<String>, // If a default table name could be provided
 }
 
 struct LanceDbGlobalState {

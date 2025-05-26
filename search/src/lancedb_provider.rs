@@ -24,24 +24,19 @@ struct FfiMetadata {
 
 pub struct LanceDbFfiSearchProvider {
     initialized: AtomicBool,
-    table_name: String,
 }
 
 impl LanceDbFfiSearchProvider {
-    pub async fn new(db_uri: &str, table_name: &str) -> Result<Self, SearchServiceError> {
+    pub async fn new(db_uri: &str) -> Result<Self, SearchServiceError> {
         let db_uri_owned = db_uri.to_string();
-        let self_table_name = table_name.to_string(); // For self.table_name
-        let closure_table_name = table_name.to_string(); // For the closure
         // For logging outside spawn_blocking if needed, capture original values or construct string here
-        let log_config_str = format!("db_path: {}, table_name: {}", db_uri, table_name);
+        let log_config_str = format!("db_path: {}", db_uri);
 
         let init_result = task::spawn_blocking(move || {
-            let config = serde_json::json!({
+            let init_config_json = serde_json::json!({
                 "db_uri": db_uri_owned,
-                "table_name": closure_table_name,
-            });
-            let config_json_string_inner = config.to_string();
-            let c_config_json = match CString::new(config_json_string_inner) {
+            }).to_string();
+            let c_config_json = match CString::new(init_config_json) {
                 Ok(c) => c,
                 Err(e) => return Err(SearchServiceError::InternalError(format!("Failed to create CString for config: {}", e))),
             };
@@ -56,7 +51,6 @@ impl LanceDbFfiSearchProvider {
                 info!("LanceDB FFI search engine initialized successfully with config: {}", log_config_str);
                 Ok(Self {
                     initialized: AtomicBool::new(true),
-                    table_name: self_table_name,
                 })
             }
             _ => {
@@ -147,35 +141,45 @@ impl SearchService for LanceDbFfiSearchProvider {
 
         let mut embedding_vec = request.question_embedding; // Take ownership
         let top_k = request.top_k;
-        let table_name_for_closure = self.table_name.clone(); // Clone for the closure
+    // Move table_name from request into the closure by capturing it here.
+    // No longer using self.table_name for the FFI request's table_name.
+    let request_table_name = request.table_name; 
 
-        task::spawn_blocking(move || {
-            embedding_vec.shrink_to_fit(); // Good practice
+    task::spawn_blocking(move || {
+        embedding_vec.shrink_to_fit(); // Good practice
 
-            // Need to ensure self.table_name is available for CString creation
-            // If self is moved into the closure, this is fine. If not, table_name needs to be cloned.
-            // Assuming self is moved or table_name is cloned appropriately before this closure.
-            let c_table_name = match CString::new(table_name_for_closure.as_str()) {
-                Ok(s) => s,
-                Err(e) => return Err(SearchServiceError::InternalError(format!("Failed to create CString for table_name: {}", e))),
-            };
+        // Convert the captured request_table_name to CString for FFI
+        let c_table_name = match CString::new(request_table_name.as_str()) {
+            Ok(s) => s,
+            Err(e) => return Err(SearchServiceError::InternalError(format!("Failed to create CString for table_name '{}': {}", request_table_name, e))),
+        };
 
-            let ffi_request = search_ffi_types::SearchRequestFfi {
+        let ffi_request = search_ffi_types::SearchRequestFfi {
                 embedding_ptr: embedding_vec.as_ptr(),
                 embedding_dim: embedding_vec.len() as u32,
-                top_k: top_k as u32,
-                table_name: c_table_name.as_ptr(),
-                // filters_json: ptr::null(), // If filters were supported
-            };
+            top_k: top_k as u32,
+            table_name: c_table_name.as_ptr(), // Use the CString from request_table_name
+            // filters_json: std::ptr::null(),    // Example for filters, if needed later
+        };
 
-            let ffi_request_ptr = &ffi_request as *const search_ffi_types::SearchRequestFfi;
+        let ffi_request_ptr = &ffi_request as *const search_ffi_types::SearchRequestFfi;
+
+            // Added detailed logging for c_table_name
+            info!(
+                "LanceDbFfiSearchProvider: About to call FFI. c_table_name pointer: {:?}, value (lossy): '{}'",
+                c_table_name.as_ptr(),
+                c_table_name.to_string_lossy()
+            );
+
             // This will hold the pointer to the FFI-allocated SearchResponseFfi
-            let mut ffi_response_raw_ptr: *mut search_ffi_types::SearchResponseFfi = ptr::null_mut(); 
+        let mut ffi_response_raw_ptr: *mut search_ffi_types::SearchResponseFfi = ptr::null_mut(); 
 
-            // Call FFI, passing the address of our raw pointer
-            let result_code = unsafe { perform_search_ffi(ffi_request_ptr, &mut ffi_response_raw_ptr) };
-            
+        // Call FFI, passing the address of our raw pointer
+        let result_code = unsafe { perform_search_ffi(ffi_request_ptr, &mut ffi_response_raw_ptr) };
+        
             // `embedding_vec` is owned by this closure and its lifetime is managed correctly.
+            // `c_table_name` (CString) is also owned and its pointer is valid for the FFI call.
+        // `c_table_name` (CString) is also owned and its pointer is valid for the FFI call.
             // `c_table_name` (CString) is also owned and its pointer is valid for the FFI call.
 
             match result_code {

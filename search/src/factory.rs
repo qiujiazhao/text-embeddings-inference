@@ -17,15 +17,13 @@ pub async fn create_search_service(
         SearchProviderType::LanceDB => {
             // Use db_url from argument if provided, otherwise default.
             let db_uri = db_url.unwrap_or_else(|| "./lance_db_data".to_string());
-            let table_name = "P-clothing"; // This could also come from configuration
 
             tracing::info!(
-                "Creating LanceDbFfiSearchProvider with URI: '{}', Table: '{}'",
-                db_uri,
-                table_name
+                "Creating LanceDbFfiSearchProvider with URI: '{}'",
+                db_uri
             );
             
-            let provider = LanceDbFfiSearchProvider::new(&db_uri, table_name).await?;
+            let provider = LanceDbFfiSearchProvider::new(&db_uri).await?;
             Ok(Arc::new(provider))
         }
         // Add other providers here
