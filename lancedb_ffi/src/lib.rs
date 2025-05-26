@@ -370,7 +370,6 @@ pub unsafe extern "C" fn perform_search_ffi(
             let id_str = id_values[i].clone(); // Use the collected and converted id_values
             let source_table_str = source_table_array.value(i).to_string();
             let distance_val = similarities_array.value(i);
-            let cosine_similarity = 1.0 - distance_val; // Convert distance to similarity
             let ask_method_code_str = ask_method_code_array.value(i).to_string();
 
             let c_id = string_to_c_char(id_str.clone())
@@ -382,7 +381,7 @@ pub unsafe extern "C" fn perform_search_ffi(
 
             current_batch_ffi_items.push(SearchResultItemFfi {
                 id: c_id,
-                score: cosine_similarity, // Use cosine_similarity
+                distance: distance_val, // Use the raw distance value
                 metadata_json: c_metadata,
             });
         }

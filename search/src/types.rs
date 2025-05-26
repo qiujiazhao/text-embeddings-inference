@@ -6,7 +6,7 @@ use utoipa::ToSchema;
 pub struct SearchResponse {
     pub id: String,
     pub source: String,
-    pub similarity: f32,
+    pub distance: f32,
     pub ask_method_code: String,
 }
 

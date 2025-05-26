@@ -27,8 +27,8 @@ pub struct SearchRequestFfi {
 pub struct SearchResultItemFfi {
     /// C 风格的字符串，表示结果的 ID。
     pub id: *mut c_char,
-    /// 结果的得分。
-    pub score: f32,
+    /// 结果的距离或得分（根据查询类型而定）。
+    pub distance: f32,
     /// C 风格的字符串，表示元数据（例如 JSON 格式）。
     pub metadata_json: *mut c_char,
 }

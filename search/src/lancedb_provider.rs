@@ -119,7 +119,7 @@ impl LanceDbFfiSearchProvider {
             service_responses.push(ServiceSearchResponse {
                 id,
                 source: metadata.source,
-                similarity: ffi_item.score,
+                distance: ffi_item.distance,
                 ask_method_code: metadata.ask_method_code,
             });
         }
