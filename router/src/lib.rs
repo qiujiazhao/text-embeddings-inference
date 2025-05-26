@@ -36,9 +36,9 @@ use tokenizers::processors::sequence::Sequence;
 use tokenizers::processors::template::TemplateProcessing;
 use tokenizers::{PostProcessorWrapper, Tokenizer};
 use tracing::Span;
-use crate::http::search_service::{create_search_service};
+use search::factory::create_search_service;
 
-
+/// Initialize logging
 pub use logging::init_logging;
 
 /// Create entrypoint
@@ -534,6 +534,7 @@ pub enum ErrorType {
     Validation,
     Tokenizer,
     Empty,
+    NotFound,
 }
 
 #[derive(Serialize)]

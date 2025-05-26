@@ -4029,6 +4029,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "search"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror 1.0.69",
+ "tracing",
+ "utoipa",
+]
+
+[[package]]
 name = "security-framework"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4548,7 +4559,6 @@ version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "async-trait",
  "axum 0.7.9",
  "axum-tracing-opentelemetry",
  "base64 0.22.1",
@@ -4571,6 +4581,7 @@ dependencies = [
  "opentelemetry_sdk 0.23.0",
  "prost 0.12.6",
  "reqwest",
+ "search",
  "serde",
  "serde_json",
  "serial_test",

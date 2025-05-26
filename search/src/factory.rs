@@ -9,5 +9,5 @@ pub fn create_search_service(db_url: Option<String>) -> Arc<dyn SearchService> {
     // For example, if db_url is Some, create a real provider, otherwise mock or error.
     tracing::info!("create_search_service (function) creating MockSearchProvider with db_url: {:?}", db_url);
     // Ensure MockSearchProvider::new() receives the db_url
-    Arc::new(MockSearchProvider::new())
+    Arc::new(MockSearchProvider::new(db_url)) // 确保这里传递了 db_url
 }

@@ -7,7 +7,7 @@ members = [
     "backends/python",
     "backends/grpc-client",
     "core",
-    "router",
+    "router", "search", # Was search_service_logic, directory will be renamed next
 ]
 default-members = [
     "backends",
@@ -52,7 +52,6 @@ candle-cublaslt= { version = "0.0.1" }
 candle-layer-norm = { version = "0.0.1" }
 candle-rotary = { version = "0.0.1" }
 candle-flash-attn-v1 = { version = "0.0.1" }
-half = { version = "2.3.1", features = ["num-traits"] }
 
 [patch.crates-io]
 cudarc = { git = "https://github.com/Narsil/cudarc" , rev = "8b4f18b4bcd5e4b1a9daf40abc3a2e27f83f06e9"}

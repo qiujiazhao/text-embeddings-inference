@@ -1,0 +1,18 @@
+[package]
+name = "search"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1.77"
+tracing = "0.1.40"
+serde = { version = "1.0.197", features = ["derive"] }
+thiserror = "1.0.58"
+utoipa = "4.2.3"
+
+# 依赖项 `crate::http::types::SearchResponse` 需要在代码迁移后处理。
+# 如果 SearchResponse 定义在 router crate 中，我们可能需要将 router crate 添加为这里的依赖，
+# 或者将 SearchResponse 的定义也移动到 search_service_logic crate 中，
+# 或者将其移动到一个更通用的 types crate 中。

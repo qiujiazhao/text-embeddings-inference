@@ -68,7 +68,8 @@ pub async fn start_server(model_id: String, revision: Option<String>, dtype: DTy
             None,
             "text-embeddings-inference.server".to_owned(),
             9000,
-            None,
+            None, // cors_allow_origin
+            None, // db_url
         )
     });
 

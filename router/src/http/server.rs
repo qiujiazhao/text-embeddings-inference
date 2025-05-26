@@ -7,9 +7,9 @@ use crate::http::types::{
     RerankRequest, RerankResponse, Sequence, SimilarityInput, SimilarityParameters,
     SimilarityRequest, SimilarityResponse, SimpleToken, SparseValue, TokenizeInput,
     TokenizeRequest, TokenizeResponse, TruncationDirection, VertexPrediction, VertexRequest,
-    VertexResponse, SearchQuery, SearchResponse,
+    VertexResponse, SearchQuery, // SearchResponse removed from here
 };
-use crate::http::search_service::{SearchService, SearchServiceRequest, SearchServiceError};
+use search::{SearchService, SearchServiceRequest, SearchServiceError, SearchResponse};
 use crate::{
     logging, shutdown, ClassifierModel, EmbeddingModel, ErrorResponse, ErrorType, Info, ModelType,
     ResponseMetadata,
@@ -1652,16 +1652,20 @@ async fn search(
     let search_service_request = SearchServiceRequest {
         question_embedding,
         industry: req.industry.clone(),
+        solution_archetype: "default_archetype".to_string(), // Added placeholder
+        search_param: req.question.clone(), // Using req.question for search_param
         top_k: req.top_k,
-        original_question: req.question.clone(),
     };
 
     let responses = search_service.search(search_service_request).await
         .map_err(|search_service_error: SearchServiceError| {
             tracing::error!("Search service error: {:?}", search_service_error);
             let (error_type_enum, error_message_str) = match search_service_error {
-                SearchServiceError::ProviderError(msg) => (crate::ErrorType::Backend, msg),
-                SearchServiceError::InternalError(msg) => (crate::ErrorType::Backend, msg),
+                SearchServiceError::DatabaseError(msg) => (crate::ErrorType::Backend, msg),
+                SearchServiceError::ValidationError(msg) => (crate::ErrorType::Validation, msg), // Or Backend, depending on desired HTTP status
+                SearchServiceError::ExternalServiceError(msg) => (crate::ErrorType::Backend, msg),
+                SearchServiceError::NotFound(msg) => (crate::ErrorType::NotFound, msg),
+                SearchServiceError::Unknown(msg) => (crate::ErrorType::Backend, msg),
             };
             let status_code = StatusCode::from(&error_type_enum);
             let error_response_struct = crate::ErrorResponse {
@@ -1980,6 +1984,7 @@ impl From<&ErrorType> for StatusCode {
             ErrorType::Tokenizer => StatusCode::UNPROCESSABLE_ENTITY,
             ErrorType::Validation => StatusCode::PAYLOAD_TOO_LARGE,
             ErrorType::Empty => StatusCode::BAD_REQUEST,
+            ErrorType::NotFound => StatusCode::NOT_FOUND, // Added mapping for NotFound
         }
     }
 }
