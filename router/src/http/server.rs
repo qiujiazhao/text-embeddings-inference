@@ -1651,7 +1651,7 @@ async fn search(
     let actual_search_processing_start_time = Instant::now();
     let search_service_request = SearchServiceRequest {
         question_embedding,
-        table_name: req.industry.clone(), // Renamed from industry, using req.industry as source for table_name
+        table_name: req.table_name.clone(), // Renamed from industry, using req.industry as source for table_name
         // solution_archetype has been removed
         search_param: req.question.clone(), // Using req.question for search_param
         top_k: req.top_k,
