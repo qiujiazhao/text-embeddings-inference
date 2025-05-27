@@ -1,123 +1,102 @@
+# Base image for chef stages, platform will be set by buildx
 FROM lukemathwalker/cargo-chef:latest-rust-1.85-bookworm AS chef
 WORKDIR /usr/src
 
-ENV SCCACHE=0.10.0
+ENV SCCACHE_VERSION=0.10.0 
 ENV RUSTC_WRAPPER=/usr/local/bin/sccache
+ENV TARGETARCH=amd64 
 
-# Donwload, configure sccache
-RUN curl -fsSL https://github.com/mozilla/sccache/releases/download/v$SCCACHE/sccache-v$SCCACHE-x86_64-unknown-linux-musl.tar.gz | tar -xzv --strip-components=1 -C /usr/local/bin sccache-v$SCCACHE-x86_64-unknown-linux-musl/sccache && \
-    chmod +x /usr/local/bin/sccache
+# Download, configure sccache based on TARGETARCH
+# Ensure curl is available in the base image or install it
+RUN apt-get update && apt-get install -y curl && \
+    SCCACHE_ARCHIVE="" && \
+    if [ "${TARGETARCH}" = "amd64" ]; then SCCACHE_ARCHIVE="sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"; \
+    elif [ "${TARGETARCH}" = "arm64" ]; then SCCACHE_ARCHIVE="sccache-v${SCCACHE_VERSION}-aarch64-unknown-linux-musl.tar.gz"; \
+    else echo "Unsupported TARGETARCH: ${TARGETARCH}" && exit 1; fi && \
+    curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${SCCACHE_ARCHIVE}" | tar -xzv --strip-components=1 -C /usr/local/bin "$(echo ${SCCACHE_ARCHIVE} | sed 's/\.tar\.gz$//')/sccache" && \
+    chmod +x /usr/local/bin/sccache && \
+    apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 FROM chef AS planner
 
+# Copy all workspace crates and main Cargo files
+COPY lancedb_ffi lancedb_ffi
+COPY search search
+COPY search_ffi_types search_ffi_types
 COPY backends backends
 COPY core core
 COPY router router
 COPY Cargo.toml ./
 COPY Cargo.lock ./
 
-RUN cargo chef prepare  --recipe-path recipe.json
+# 只在工作空间根目录运行一次 cargo chef prepare
+RUN cargo chef prepare --recipe-path recipe.json
 
+# Builder stage
 FROM chef AS builder
 
 ARG GIT_SHA
 ARG DOCKER_LABEL
+ARG SCCACHE_GHA_ENABLED # sccache GHA specific variable
 
-# sccache specific variables
-ARG SCCACHE_GHA_ENABLED
+# Install protobuf-compiler for lance-encoding and other build dependencies
+RUN apt-get update && apt-get install -y protobuf-compiler build-essential pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
-RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
-    | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
-    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | \
-    tee /etc/apt/sources.list.d/oneAPI.list
+WORKDIR /usr/src
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    intel-oneapi-mkl-devel=2024.0.0-49656 \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN echo "int mkl_serv_intel_cpu_true() {return 1;}" > fakeintel.c && \
-    gcc -shared -fPIC -o libfakeintel.so fakeintel.c
-
+# 从 planner 阶段复制统一的 recipe.json
 COPY --from=planner /usr/src/recipe.json recipe.json
 
-RUN --mount=type=secret,id=actions_results_url,env=ACTIONS_RESULTS_URL \
-    --mount=type=secret,id=actions_runtime_token,env=ACTIONS_RUNTIME_TOKEN \
-    cargo chef cook --release --features ort,candle,mkl --no-default-features --recipe-path recipe.json && sccache -s
+# 在工作空间根目录运行一次 cargo chef cook，编译所有依赖
+RUN cargo chef cook --release --features candle,http --no-default-features --recipe-path recipe.json && sccache -s
 
+# 先处理 lancedb_ffi
+COPY lancedb_ffi lancedb_ffi
+COPY search_ffi_types search_ffi_types
+
+# 进入 lancedb_ffi 目录编译静态库
+WORKDIR /usr/src/lancedb_ffi
+RUN cargo build --release && sccache -s
+
+# 回到工作空间根目录
+WORKDIR /usr/src
+
+# 复制其余工作空间源代码
+COPY search search
 COPY backends backends
 COPY core core
 COPY router router
 COPY Cargo.toml ./
 COPY Cargo.lock ./
 
-FROM builder AS http-builder
+# 编译应用程序二进制文件
+RUN cargo build --release --bin text-embeddings-router --features candle,http --no-default-features && sccache -s
 
-RUN --mount=type=secret,id=actions_results_url,env=ACTIONS_RESULTS_URL \
-    --mount=type=secret,id=actions_runtime_token,env=ACTIONS_RUNTIME_TOKEN \
-    cargo build --release --bin text-embeddings-router --features ort,candle,mkl,http --no-default-features && sccache -s
-
-FROM builder AS grpc-builder
-
-RUN PROTOC_ZIP=protoc-21.12-linux-x86_64.zip && \
-    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v21.12/$PROTOC_ZIP && \
-    unzip -o $PROTOC_ZIP -d /usr/local bin/protoc && \
-    unzip -o $PROTOC_ZIP -d /usr/local 'include/*' && \
-    rm -f $PROTOC_ZIP
-
-COPY proto proto
-
-RUN --mount=type=secret,id=actions_results_url,env=ACTIONS_RESULTS_URL \
-    --mount=type=secret,id=actions_runtime_token,env=ACTIONS_RUNTIME_TOKEN \
-    cargo build --release --bin text-embeddings-router --features ort,candle,mkl,grpc --no-default-features && sccache -s
-
+# Final runtime base image, platform will be set by buildx
 FROM debian:bookworm-slim AS base
 
 ENV HUGGINGFACE_HUB_CACHE=/data \
     PORT=80 \
-    MKL_ENABLE_INSTRUCTIONS=AVX512_E4 \
-    RAYON_NUM_THREADS=8 \
-    LD_PRELOAD=/usr/local/libfakeintel.so \
-    LD_LIBRARY_PATH=/usr/local/lib
+    RAYON_NUM_THREADS=8
 
+# Install minimal runtime dependencies
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    libomp-dev \
     ca-certificates \
     libssl-dev \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy a lot of the Intel shared objects because of the mkl_serv_intel_cpu_true patch...
-COPY --from=builder /opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_intel_lp64.so.2 /usr/local/lib/libmkl_intel_lp64.so.2
-COPY --from=builder /opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_intel_thread.so.2 /usr/local/lib/libmkl_intel_thread.so.2
-COPY --from=builder /opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_core.so.2 /usr/local/lib/libmkl_core.so.2
-COPY --from=builder /opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_vml_def.so.2 /usr/local/lib/libmkl_vml_def.so.2
-COPY --from=builder /opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_def.so.2 /usr/local/lib/libmkl_def.so.2
-COPY --from=builder /opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_vml_avx2.so.2 /usr/local/lib/libmkl_vml_avx2.so.2
-COPY --from=builder /opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_vml_avx512.so.2 /usr/local/lib/libmkl_vml_avx512.so.2
-COPY --from=builder /opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_avx2.so.2 /usr/local/lib/libmkl_avx2.so.2
-COPY --from=builder /opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_avx512.so.2 /usr/local/lib/libmkl_avx512.so.2
-COPY --from=builder /usr/src/libfakeintel.so /usr/local/libfakeintel.so
-
-FROM base AS grpc
-
-COPY --from=grpc-builder /usr/src/target/release/text-embeddings-router /usr/local/bin/text-embeddings-router
-
-ENTRYPOINT ["text-embeddings-router"]
-CMD ["--json-output"]
-
+# HTTP image
 FROM base AS http
 
-COPY --from=http-builder /usr/src/target/release/text-embeddings-router /usr/local/bin/text-embeddings-router
-
-# Amazon SageMaker compatible image
-FROM http AS sagemaker
-COPY --chmod=775 sagemaker-entrypoint.sh entrypoint.sh
-
-ENTRYPOINT ["./entrypoint.sh"]
-
-# Default image
-FROM http
+COPY --from=builder /usr/src/target/release/text-embeddings-router /usr/local/bin/text-embeddings-router
 
 ENTRYPOINT ["text-embeddings-router"]
 CMD ["--json-output"]
+
+# Amazon SageMaker compatible image (if still needed)
+# FROM http AS sagemaker
+# COPY --chmod=775 sagemaker-entrypoint.sh entrypoint.sh # Ensure this script exists
+# ENTRYPOINT ["./entrypoint.sh"]
+
+# Default image
+# FROM http
