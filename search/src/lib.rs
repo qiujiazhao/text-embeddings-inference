@@ -1,4 +1,5 @@
 pub mod factory;
+pub mod ffi_client;
 pub mod lancedb_provider;
 pub mod search_provider;
 pub mod search_trait;
@@ -8,7 +9,6 @@ use search_ffi_types::{
     FfiResultCode, SearchEngineConfigFfi, SearchEngineHandle, SearchRequestObjectFfi,
     SearchResultItemFfi,
 };
-use std::os::raw::c_char;
 
 extern "C" {
     // --- New Object-Based FFI functions ---
