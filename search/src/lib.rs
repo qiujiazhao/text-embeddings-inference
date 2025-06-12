@@ -1,24 +1,27 @@
 pub mod factory;
+pub mod lancedb_provider;
 pub mod search_provider;
 pub mod search_trait;
-pub mod lancedb_provider;
 pub mod types;
 
-use search_ffi_types::{FfiResultCode, SearchRequestFfi, SearchResponseFfi};
+use search_ffi_types::{
+    FfiResultCode, SearchEngineConfigFfi, SearchEngineHandle, SearchRequestObjectFfi,
+    SearchResultItemFfi,
+};
 use std::os::raw::c_char;
 
 extern "C" {
-    // FFI functions from lancedb_ffi static library
-    // These are unsafe to call because they are FFI calls.
-    fn init_search_engine_ffi(config_json_ptr: *const c_char) -> FfiResultCode;
-    fn perform_search_ffi(
-        request_ptr: *const SearchRequestFfi,
-        response_ptr_ptr: *mut *mut SearchResponseFfi, // Corrected: pointer to pointer
+    // --- New Object-Based FFI functions ---
+    fn search_engine_new(config: *const SearchEngineConfigFfi) -> *mut SearchEngineHandle;
+    fn search_engine_drop(engine: *mut SearchEngineHandle);
+    fn search_engine_search_sync(
+        engine: *mut SearchEngineHandle,
+        request: *const SearchRequestObjectFfi,
+        results_out: *mut *mut SearchResultItemFfi,
+        num_results_out: *mut usize,
     ) -> FfiResultCode;
-    fn free_search_response_ffi(response_ptr: *mut SearchResponseFfi);
-    #[allow(dead_code)]
-    fn free_ffi_string(s_ptr: *mut c_char);
-    fn shutdown_search_engine_ffi() -> FfiResultCode;
+    fn free_search_results_ffi(results: *mut SearchResultItemFfi, num_results: usize);
+    // fn free_ffi_string(s_ptr: *mut c_char); // This is no longer needed
 }
 
 // Re-export the public APIs

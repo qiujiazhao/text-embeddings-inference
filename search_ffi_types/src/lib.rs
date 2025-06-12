@@ -1,24 +1,4 @@
-
 use std::os::raw::c_char;
-
-/// FFI 兼容的搜索请求结构体。
-/// 注意：所有字符串 (`*const c_char`) 都应该是有效的 UTF-8 编码，
-/// 并且由调用者（通常是 C/C++ 或其他语言通过 FFI）负责管理其生命周期。
-/// `lancedb_ffi` crate 在接收到这些指针后，应立即将其转换为 Rust 的 String 类型。
-#[repr(C)]
-#[derive(Debug)]
-pub struct SearchRequestFfi {
-    /// 指向浮点数数组（嵌入向量）的指针。
-    pub embedding_ptr: *const f32,
-    /// 嵌入向量的维度。
-    pub embedding_dim: u32,
-    /// 要返回的顶部结果数量。
-    pub top_k: u32,
-    /// C 风格的字符串，表示要搜索的表名。
-    pub table_name: *const c_char,
-    // 可以在这里添加其他参数，例如过滤器（JSON 字符串形式）。
-    // pub filters_json: *const c_char,
-}
 
 /// FFI 兼容的单个搜索结果项。
 /// 注意：字符串字段同样由 FFI 边界的另一端管理内存。
@@ -31,31 +11,6 @@ pub struct SearchResultItemFfi {
     pub distance: f32,
     /// C 风格的字符串，表示元数据（例如 JSON 格式）。
     pub metadata_json: *mut c_char,
-}
-
-/// FFI 兼容的搜索响应结构体。
-/// 注意：`results` 是一个指向 `SearchResultItemFfi` 数组的指针。
-/// `lancedb_ffi` crate 在创建此结构并填充数据后，需要提供一个相应的释放函数，
-/// 以便调用者可以安全地释放分配给 `results` 和其中字符串的内存。
-#[repr(C)]
-#[derive(Debug)]
-pub struct SearchResponseFfi {
-    /// 指向 `SearchResultItemFfi` 数组的指针。
-    pub results: *mut SearchResultItemFfi,
-    /// `results` 数组中的元素数量。
-    pub num_results: usize,
-    /// C 风格的字符串，表示错误信息。如果操作成功，则为 null。
-    pub error_message: *mut c_char,
-}
-
-impl Default for SearchResponseFfi {
-    fn default() -> Self {
-        SearchResponseFfi {
-            results: std::ptr::null_mut(),
-            num_results: 0,
-            error_message: std::ptr::null_mut(),
-        }
-    }
 }
 
 /// FFI 函数返回的结果代码枚举。
@@ -72,6 +27,32 @@ pub enum FfiResultCode {
     SearchFailed = -7,
     MemoryAllocationFailed = -8,
     InternalError = -99,
+}
+
+// --- New Object-Based API Types ---
+
+/// An opaque type that represents a `SearchEngine` instance across the FFI boundary.
+#[repr(C)]
+pub struct SearchEngineHandle {
+    _private: [u8; 0],
+}
+
+/// Configuration struct for creating a `SearchEngine`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct SearchEngineConfigFfi {
+    /// C-style string pointing to the database URI.
+    pub db_uri: *const c_char,
+}
+
+/// Request struct for the object-based search API.
+#[repr(C)]
+#[derive(Debug)]
+pub struct SearchRequestObjectFfi {
+    pub embedding_ptr: *const f32,
+    pub embedding_dim: u32,
+    pub top_k: u32,
+    pub table_name: *const c_char,
 }
 
 /*
