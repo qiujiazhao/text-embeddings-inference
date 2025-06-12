@@ -151,6 +151,55 @@ pub struct SearchEngine {
     runtime_handle: tokio::runtime::Handle,
 }
 
+impl SearchEngine {
+    /// Opens a table, using a cache if possible.
+    fn get_table(&mut self, name: &str) -> Result<Arc<lancedb::Table>, FfiError> {
+        if let Some(cached_table) = self.table_cache.get(name) {
+            return Ok(Arc::clone(cached_table));
+        }
+
+        let conn = Arc::clone(&self.connection);
+        match self
+            .runtime_handle
+            .block_on(conn.open_table(name).execute())
+        {
+            Ok(opened_table) => {
+                let table_arc = Arc::new(opened_table);
+                self.table_cache
+                    .insert(name.to_string(), Arc::clone(&table_arc));
+                info!("FFI: Opened and cached table '{}'", name);
+                Ok(table_arc)
+            }
+            Err(e) => {
+                error!("FFI Error: Failed to open table '{}': {}", name, e);
+                Err(FfiError::LanceDbError(e))
+            }
+        }
+    }
+
+    /// Performs the actual vector search.
+    fn search(
+        &mut self,
+        table_name: &str,
+        query_vector: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<RecordBatch>, FfiError> {
+        let table = self.get_table(table_name)?;
+        
+        self.runtime_handle.block_on(async {
+            let stream = table
+                .vector_search(query_vector)
+                .map_err(|e| FfiError::InternalError(e.to_string()))?
+                .limit(top_k)
+                .distance_type(lancedb::DistanceType::Cosine)
+                .execute()
+                .await
+                .map_err(FfiError::LanceDbError)?;
+            stream.try_collect().await.map_err(FfiError::LanceDbError)
+        })
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn search_engine_new(
     config_ptr: *const SearchEngineConfigFfi,
@@ -223,6 +272,7 @@ pub unsafe extern "C" fn search_engine_search_sync(
     let engine = &mut *(engine_ptr as *mut SearchEngine);
     let request = &*request_ptr;
 
+    // --- Input Conversion ---
     let table_name = match c_char_to_string(request.table_name, "table_name") {
         Ok(name) => name,
         Err(e) => {
@@ -238,45 +288,16 @@ pub unsafe extern "C" fn search_engine_search_sync(
     let query_vector: Vec<f32> =
         slice::from_raw_parts(request.embedding_ptr, request.embedding_dim as usize).to_vec();
 
-    let table = if let Some(cached_table) = engine.table_cache.get(&table_name) {
-        Arc::clone(cached_table)
-    } else {
-        let conn = Arc::clone(&engine.connection);
-        match engine
-            .runtime_handle
-            .block_on(conn.open_table(&table_name).execute())
-        {
-            Ok(opened_table) => {
-                let table_arc = Arc::new(opened_table);
-                engine
-                    .table_cache
-                    .insert(table_name.clone(), Arc::clone(&table_arc));
-                info!("FFI: Opened and cached table '{}'", table_name);
-                table_arc
-            }
-            Err(e) => {
-                error!("FFI Error: Failed to open table '{}': {}", table_name, e);
-                return FfiResultCode::LanceDbError;
-            }
-        }
-    };
-
-    let search_result = engine.runtime_handle.block_on(async {
-        let stream = table
-            .vector_search(&query_vector)
-            .map_err(|e| FfiError::InternalError(e.to_string()))?
-            .limit(request.top_k as usize)
-            .distance_type(lancedb::DistanceType::Cosine)
-            .execute()
-            .await
-            .map_err(FfiError::LanceDbError)?;
-        stream.try_collect().await.map_err(FfiError::LanceDbError)
-    });
-
+    // --- Core Logic Call ---
+    let search_result = engine.search(
+        &table_name,
+        &query_vector,
+        request.top_k as usize,
+    );
+    
+    // --- Output Conversion ---
     match search_result {
         Ok(batches) => {
-            // This is a simplified version of your result conversion.
-            // You should replace this with a more robust implementation.
             let mut ffi_results = Vec::new();
             for batch in batches {
                 if let Ok(items) = convert_batch_to_ffi_items(&batch) {

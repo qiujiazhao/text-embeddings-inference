@@ -10,7 +10,21 @@ use serde::Deserialize;
 use tracing::{error, info};
 
 use crate::search_trait::{SearchServiceError, SearchResponse as ServiceSearchResponse, SearchServiceRequest};
-use crate::{search_engine_new, search_engine_drop, search_engine_search_sync, free_search_results_ffi};
+
+// FFI function signatures from the `lancedb_ffi` crate.
+// These are marked as unsafe because they call into foreign code.
+#[link(name = "lancedb_ffi", kind = "static")]
+extern "C" {
+    fn search_engine_new(config_ptr: *const SearchEngineConfigFfi) -> *mut SearchEngineHandle;
+    fn search_engine_drop(engine_ptr: *mut SearchEngineHandle);
+    fn search_engine_search_sync(
+        engine_ptr: *mut SearchEngineHandle,
+        request_ptr: *const SearchRequestObjectFfi,
+        results_out: *mut *mut SearchResultItemFfi,
+        num_results_out: *mut usize,
+    ) -> FfiResultCode;
+    fn free_search_results_ffi(results: *mut SearchResultItemFfi, num_results: usize);
+}
 
 // Helper struct to deserialize metadata_json from FFI
 #[derive(Deserialize, Debug)]
