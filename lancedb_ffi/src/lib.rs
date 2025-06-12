@@ -1,19 +1,18 @@
 use search_ffi_types::{
     FfiResultCode, SearchEngineConfigFfi, SearchEngineHandle, SearchRequestObjectFfi,
-    SearchRequestFfi, SearchResponseFfi, SearchResultItemFfi,
+    SearchResultItemFfi,
 };
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use once_cell::sync::Lazy;
-use std::sync::{Mutex, Arc};
+use std::sync::Arc;
 use std::collections::HashMap;
 use lancedb::{Error as LanceDbErrorExt}; // Renamed to avoid conflict with FfiError::LanceDbError if any
 use tokio::runtime::{Runtime, Builder as RuntimeBuilder};
-use serde::Deserialize;
 use futures::stream::TryStreamExt;
 use arrow_array::{RecordBatch, array::{StringArray, Float32Array}};
 use lancedb::query::QueryBase;
@@ -384,14 +383,14 @@ fn convert_batch_to_ffi_items(batch: &RecordBatch) -> Result<Vec<SearchResultIte
         let ask_method_code_str = ask_method_code_array.value(i).to_string();
 
         let c_id = string_to_c_char(id_str.clone())
-            .map_err(|e| format!("FFI: Failed to convert ID '{}' to CString: {}", id_str, e))?;
+            .map_err(|e| FfiError::InternalError(format!("FFI: Failed to convert ID '{}' to CString: {}", id_str, e)))?;
         
         let metadata_str = format!(
             "{{\"source\": \"{}\", \"ask_method_code\": \"{}\"}}",
             source_table_str, ask_method_code_str
         );
         let c_metadata = string_to_c_char(metadata_str.clone())
-            .map_err(|e| format!("FFI: Failed to convert metadata '{}' to CString: {}", metadata_str, e))?;
+            .map_err(|e| FfiError::InternalError(format!("FFI: Failed to convert metadata '{}' to CString: {}", metadata_str, e)))?;
 
         items.push(SearchResultItemFfi {
             id: c_id,
