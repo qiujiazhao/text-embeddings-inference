@@ -13,7 +13,6 @@ use crate::search_trait::{SearchServiceError, SearchResponse as ServiceSearchRes
 
 // FFI function signatures from the `lancedb_ffi` crate.
 // These are marked as unsafe because they call into foreign code.
-#[link(name = "lancedb_ffi", kind = "static")]
 extern "C" {
     fn search_engine_new(config_ptr: *const SearchEngineConfigFfi) -> *mut SearchEngineHandle;
     fn search_engine_drop(engine_ptr: *mut SearchEngineHandle);
