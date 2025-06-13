@@ -33,7 +33,7 @@ thread_local! {
 }
 
 /// Sets the last error for the current thread. The message is stored in a CString.
-fn set_last_error(err: FfiError) {
+fn set_last_error(err: &FfiError) {
     error!("FFI Error: {}", err); // Log the error for debugging purposes.
     let error_message = CString::new(err.to_string()).unwrap_or_else(|_| {
         // This fallback should rarely happen.
@@ -200,7 +200,7 @@ pub unsafe extern "C" fn search_engine_new(
 
     if config_ptr.is_null() {
         error!("FFI Error in search_engine_new: config_ptr is null.");
-        set_last_error(FfiError::NullArgument("config_ptr".to_string()));
+        set_last_error(&FfiError::NullArgument("config_ptr".to_string()));
         return ptr::null_mut();
     }
     let config = &*config_ptr;
@@ -209,7 +209,7 @@ pub unsafe extern "C" fn search_engine_new(
         Ok(uri) => uri,
         Err(e) => {
             error!("FFI Error in search_engine_new: Invalid db_uri: {}", e);
-            set_last_error(e);
+            set_last_error(&e);
             return ptr::null_mut();
         }
     };
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn search_engine_new(
                 db_uri, e
             ));
             error!("FFI Error in search_engine_new: {}", ffi_error);
-            set_last_error(ffi_error);
+            set_last_error(&ffi_error);
             return ptr::null_mut();
         }
     };
@@ -256,7 +256,7 @@ pub unsafe extern "C" fn search_engine_search_sync(
 ) -> FfiResultCode {
     if engine_ptr.is_null() || request_ptr.is_null() || results_out.is_null() || num_results_out.is_null() {
         let err = FfiError::NullArgument("A required pointer argument is null.".to_string());
-        set_last_error(err);
+        set_last_error(&err);
         error!("FFI Error in search_engine_search_sync: A required pointer argument is null.");
         return FfiResultCode::NullArgument;
     }
@@ -274,7 +274,7 @@ pub unsafe extern "C" fn search_engine_search_sync(
             match c_char_to_string($ptr, $name) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_last_error(e);
+                    set_last_error(&e);
                     return FfiResultCode::from(&e);
                 }
             }
@@ -289,7 +289,7 @@ pub unsafe extern "C" fn search_engine_search_sync(
 
     if request.embedding_ptr.is_null() || request.embedding_dim == 0 {
         let err = FfiError::NullArgument("embedding_ptr is null or embedding_dim is 0".to_string());
-        set_last_error(err);
+        set_last_error(&err);
         error!("FFI Error in search_engine_search_sync: Invalid embedding_ptr or embedding_dim");
         return FfiResultCode::InvalidArgument;
     }
@@ -317,7 +317,7 @@ pub unsafe extern "C" fn search_engine_search_sync(
                 match convert_batch_to_ffi_items(&batch, conversion_params) {
                     Ok(items) => ffi_results.extend(items),
                     Err(e) => {
-                        set_last_error(e);
+                        set_last_error(&e);
                         // In case of partial success, we should free what we've allocated so far
                         // before returning an error.
                         for item in ffi_results {
@@ -339,7 +339,7 @@ pub unsafe extern "C" fn search_engine_search_sync(
         }
         Err(e) => {
             error!("FFI search failed: {}", e);
-            set_last_error(e);
+            set_last_error(&e);
             FfiResultCode::from(&e)
         }
     }
