@@ -44,8 +44,6 @@ fn set_last_error(err: FfiError) {
     });
 }
 
-// static mut LANCE_DB_CONNECTION: Option<lancedb::connection::Connection> = None; // Old placeholder
-// static mut LANCE_DB_TABLE: Option<lancedb::table::Table> = None; // Old placeholder
 
 #[derive(Error, Debug)]
 pub enum FfiError {
@@ -96,6 +94,7 @@ unsafe fn c_char_to_string(s: *const c_char, field_name: &str) -> Result<String,
 fn string_to_c_char(s: String) -> Result<*mut c_char, FfiError> {
     CString::new(s).map(|cs| cs.into_raw()).map_err(FfiError::from)
 }
+
 
 /// Frees a C string that was allocated by Rust and passed to C.
 /// `s_ptr`: Pointer to the C string to be freed.
@@ -367,6 +366,7 @@ pub unsafe extern "C" fn free_search_results_ffi(
     // Free the array itself
     let _ = Vec::from_raw_parts(results, num_results, num_results);
 }
+
 
 struct ColumnConversionParams<'a> {
     id_column: &'a str,
