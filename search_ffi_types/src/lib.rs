@@ -59,38 +59,37 @@ pub struct SearchRequestObjectFfi {
     pub ask_method_code_column: *const c_char,
 }
 
-/*
-// 未来 `lancedb_ffi` crate 将会实现这些 FFI 函数。
-// 我们可以在这里（或者在 `lancedb_ffi` crate 中）声明它们，以便 `search` crate 可以链接。
-// 例如：
 extern "C" {
-    /// Retrieves the last error message from the FFI layer for the current thread.
-    /// The caller is responsible for freeing the returned string using `lancedb_ffi_free_string`.
-    // pub fn lancedb_ffi_get_last_error() -> *mut c_char;
+    //
+    // Search Engine Lifecycle
+    //
 
-    /// Frees a string that was allocated by the FFI layer.
-    // pub fn lancedb_ffi_free_string(s: *mut c_char);
+    pub fn search_engine_new(config_ptr: *const SearchEngineConfigFfi) -> *mut SearchEngineHandle;
+    pub fn search_engine_drop(engine_ptr: *mut SearchEngineHandle);
 
-    /// 初始化搜索引擎。
-    /// config_json: 一个 JSON 字符串，包含初始化所需的配置。
-    /// 返回 FfiResultCode。
-    // pub fn init_search_engine(config_json: *const c_char) -> FfiResultCode;
+    //
+    // Search Operations
+    //
 
-    /// 执行搜索。
-    /// request: 指向 SearchRequestFfi 结构的指针。
-    /// response: 指向 SearchResponseFfi 结构的指针，函数将填充此结构。
-    /// 返回 FfiResultCode。
-    // pub fn perform_search(request: *const SearchRequestFfi, response: *mut SearchResponseFfi) -> FfiResultCode;
+    pub fn search_engine_search_sync(
+        engine_ptr: *mut SearchEngineHandle,
+        request_ptr: *const SearchRequestObjectFfi,
+        results_out: *mut *mut SearchResultItemFfi,
+        num_results_out: *mut usize,
+    ) -> FfiResultCode;
 
-    /// 释放由 perform_search 分配的 SearchResponseFfi 结构及其内部数据。
-    /// response: 指向需要释放的 SearchResponseFfi 结构的指针。
-    // pub fn free_search_response(response: *mut SearchResponseFfi);
+    pub fn free_search_results_ffi(results: *mut SearchResultItemFfi, num_results: usize);
 
-    /// 关闭搜索引擎并释放所有相关资源。
-    // pub fn shutdown_search_engine() -> FfiResultCode;
+    //
+    // Error Handling
+    //
 
-    /// 释放由 FFI 函数返回的（且不由 SearchResponseFfi 管理的）C 字符串。
-    /// 一般用于释放 error_message 或 SearchResultItemFfi 中的字符串字段（如果它们是单独分配的话）。
-    /// 通常，更好的做法是让 free_search_response 负责所有相关内存。
-    // pub fn free_ffi_string(s: *mut c_char);
-}*/
+    /// Retrieves the last error message from the current thread.
+    ///
+    /// The caller owns the returned string and must free it with `lancedb_ffi_free_string`.
+    /// Returns a null pointer if there is no error.
+    pub fn lancedb_ffi_get_last_error() -> *mut c_char;
+
+    /// Frees a C string that was allocated by the FFI layer (e.g., via `lancedb_ffi_get_last_error`).
+    pub fn lancedb_ffi_free_string(s: *mut c_char);
+}

@@ -118,17 +118,7 @@ pub unsafe extern "C" fn lancedb_ffi_get_last_error() -> *mut c_char {
     })
 }
 
-// Basic test to ensure the FFI functions can be linked and called (at least the placeholders).
-// More comprehensive tests would require a C/C++ test harness or a Rust test that simulates FFI calls.
-#[cfg(test)]
-mod tests {
-    // The previous tests were outdated and referred to functions that no longer exist.
-    // A proper test suite would require setting up a test database and calling
-    // the current FFI functions (`search_engine_new`, `search_engine_search_sync`, etc.)
-    // which is beyond the scope of this simple fix.
-    // For now, we remove the broken tests.
-}
-
+// The outdated test module below is being removed as it refers to obsolete FFI functions.
 // --- New Object-Based API Implementation ---
 
 /// The actual implementation behind the opaque `SearchEngineHandle`.

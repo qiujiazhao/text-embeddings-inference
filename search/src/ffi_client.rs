@@ -3,31 +3,16 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 
 use search_ffi_types::{
-    FfiResultCode, SearchEngineConfigFfi, SearchEngineHandle, SearchRequestObjectFfi,
-    SearchResultItemFfi,
+    free_search_results_ffi, lancedb_ffi_free_string, lancedb_ffi_get_last_error,
+    search_engine_drop, search_engine_new, search_engine_search_sync, FfiResultCode,
+    SearchEngineConfigFfi, SearchEngineHandle, SearchRequestObjectFfi, SearchResultItemFfi,
 };
 use serde::Deserialize;
 use tracing::{error, info};
 
 use crate::search_trait::{SearchServiceError, SearchResponse as ServiceSearchResponse, SearchServiceRequest};
 
-// FFI function signatures from the `lancedb_ffi` crate.
-// These are marked as unsafe because they call into foreign code.
-extern "C" {
-    fn search_engine_new(config_ptr: *const SearchEngineConfigFfi) -> *mut SearchEngineHandle;
-    fn search_engine_drop(engine_ptr: *mut SearchEngineHandle);
-    fn search_engine_search_sync(
-        engine_ptr: *mut SearchEngineHandle,
-        request_ptr: *const SearchRequestObjectFfi,
-        results_out: *mut *mut SearchResultItemFfi,
-        num_results_out: *mut usize,
-    ) -> FfiResultCode;
-    fn free_search_results_ffi(results: *mut SearchResultItemFfi, num_results: usize);
-    
-    // New FFI functions for detailed error handling.
-    fn lancedb_ffi_get_last_error() -> *mut i8; // Corresponds to c_char
-    fn lancedb_ffi_free_string(s: *mut i8);
-}
+// FFI function signatures are now imported from the `search_ffi_types` crate.
 
 // Helper struct to deserialize metadata_json from FFI
 #[derive(Deserialize, Debug)]
