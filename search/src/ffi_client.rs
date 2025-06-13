@@ -36,11 +36,12 @@ impl LanceDbFfiClient {
     /// Creates a new FFI client, initializing the underlying search engine.
     /// This is a blocking operation.
     pub fn new(db_uri: &str) -> Result<Self, SearchServiceError> {
-        let db_uri_owned = db_uri.to_string();
-        
         let engine = {
-            let c_db_uri = CString::new(db_uri_owned.as_str()).map_err(|e| {
-                SearchServiceError::InternalError(format!("Failed to create CString for db_uri: {}", e))
+            let c_db_uri = CString::new(db_uri).map_err(|e| {
+                SearchServiceError::InternalError(format!(
+                    "Failed to create CString for db_uri: {}",
+                    e
+                ))
             })?;
 
             let config = SearchEngineConfigFfi {
@@ -67,8 +68,7 @@ impl LanceDbFfiClient {
         &self,
         request: SearchServiceRequest,
     ) -> Result<Vec<ServiceSearchResponse>, SearchServiceError> {
-
-        let mut embedding_vec = request.question_embedding;
+        let embedding_vec = request.question_embedding;
         let c_table_name = CString::new(request.table_name.as_str())
             .map_err(|e| SearchServiceError::InternalError(format!("Invalid table name: {}", e)))?;
         
@@ -77,8 +77,6 @@ impl LanceDbFfiClient {
         let c_source_column = CString::new("source_table").unwrap();
         let c_distance_column = CString::new("_distance").unwrap();
         let c_ask_method_code_column = CString::new("ask_method_code").unwrap();
-
-        embedding_vec.shrink_to_fit();
 
         let ffi_request = SearchRequestObjectFfi {
             embedding_ptr: embedding_vec.as_ptr(),
