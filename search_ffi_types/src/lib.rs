@@ -53,6 +53,10 @@ pub struct SearchRequestObjectFfi {
     pub embedding_dim: u32,
     pub top_k: u32,
     pub table_name: *const c_char,
+    pub id_column: *const c_char,
+    pub source_column: *const c_char,
+    pub distance_column: *const c_char,
+    pub ask_method_code_column: *const c_char,
 }
 
 /*
@@ -60,6 +64,13 @@ pub struct SearchRequestObjectFfi {
 // 我们可以在这里（或者在 `lancedb_ffi` crate 中）声明它们，以便 `search` crate 可以链接。
 // 例如：
 extern "C" {
+    /// Retrieves the last error message from the FFI layer for the current thread.
+    /// The caller is responsible for freeing the returned string using `lancedb_ffi_free_string`.
+    // pub fn lancedb_ffi_get_last_error() -> *mut c_char;
+
+    /// Frees a string that was allocated by the FFI layer.
+    // pub fn lancedb_ffi_free_string(s: *mut c_char);
+
     /// 初始化搜索引擎。
     /// config_json: 一个 JSON 字符串，包含初始化所需的配置。
     /// 返回 FfiResultCode。

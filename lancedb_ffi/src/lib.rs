@@ -9,7 +9,7 @@ use std::slice;
 use thiserror::Error;
 use tracing::{error, info};
 use once_cell::sync::Lazy;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
 use lancedb::{Error as LanceDbErrorExt}; // Renamed to avoid conflict with FfiError::LanceDbError if any
 use tokio::runtime::{Runtime, Builder as RuntimeBuilder};
@@ -17,6 +17,7 @@ use futures::stream::TryStreamExt;
 use arrow_array::{RecordBatch, array::{StringArray, Float32Array}};
 use lancedb::query::QueryBase;
 use lancedb::query::ExecutableQuery;
+use std::cell::RefCell;
 
 // Global Tokio runtime for executing async LanceDB operations
 static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
@@ -25,6 +26,23 @@ static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .build()
         .expect("Failed to create Tokio runtime for LanceDB FFI")
 });
+
+thread_local! {
+    /// Holds the last error produced by an FFI call on the current thread.
+    static LAST_ERROR: RefCell<Option<CString>> = RefCell::new(None);
+}
+
+/// Sets the last error for the current thread. The message is stored in a CString.
+fn set_last_error(err: FfiError) {
+    error!("FFI Error: {}", err); // Log the error for debugging purposes.
+    let error_message = CString::new(err.to_string()).unwrap_or_else(|_| {
+        // This fallback should rarely happen.
+        CString::new("Error message contained null bytes and could not be converted.").unwrap()
+    });
+    LAST_ERROR.with(|cell| {
+        *cell.borrow_mut() = Some(error_message);
+    });
+}
 
 // static mut LANCE_DB_CONNECTION: Option<lancedb::connection::Connection> = None; // Old placeholder
 // static mut LANCE_DB_TABLE: Option<lancedb::table::Table> = None; // Old placeholder
@@ -74,71 +92,41 @@ unsafe fn c_char_to_string(s: *const c_char, field_name: &str) -> Result<String,
 }
 
 /// Helper to convert Rust String to C string (CString for ownership, then into_raw).
-/// Caller is responsible for freeing the C string using `free_ffi_string`.
+/// Caller is responsible for freeing the C string using `lancedb_ffi_free_string`.
 fn string_to_c_char(s: String) -> Result<*mut c_char, FfiError> {
     CString::new(s).map(|cs| cs.into_raw()).map_err(FfiError::from)
 }
 
-
 /// Frees a C string that was allocated by Rust and passed to C.
 /// `s_ptr`: Pointer to the C string to be freed.
-/* This function is no longer used by the new API design.
 #[no_mangle]
-pub unsafe extern "C" fn free_ffi_string(s_ptr: *mut c_char) {
+pub unsafe extern "C" fn lancedb_ffi_free_string(s_ptr: *mut c_char) {
     if !s_ptr.is_null() {
         drop(CString::from_raw(s_ptr));
     }
 }
-*/
+
+/// Retrieves the last error message from the current thread.
+/// The caller owns the returned string and must free it with `lancedb_ffi_free_string`.
+/// Returns a null pointer if there is no error.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_ffi_get_last_error() -> *mut c_char {
+    LAST_ERROR.with(|cell| {
+        cell.borrow_mut()
+            .take()
+            .map_or(ptr::null_mut(), |s| s.into_raw())
+    })
+}
 
 // Basic test to ensure the FFI functions can be linked and called (at least the placeholders).
 // More comprehensive tests would require a C/C++ test harness or a Rust test that simulates FFI calls.
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::ffi::CString;
-
-    #[test]
-    fn test_init_ffi() {
-        let config = CString::new("{ \"db_path\": \"/tmp/test_db\" }").unwrap();
-        let result = unsafe { init_search_engine_ffi(config.as_ptr()) };
-        assert_eq!(result, FfiResultCode::Success);
-    }
-
-    #[test]
-    fn test_search_and_free_ffi() {
-        // Dummy request for vector search
-        let dummy_embedding: Vec<f32> = vec![0.1, 0.2, 0.3]; // Example embedding
-        let request = SearchRequestFfi {
-            embedding_ptr: dummy_embedding.as_ptr(),
-            embedding_dim: dummy_embedding.len() as u32,
-            top_k: 10,
-        };
-
-        // Prepare response struct (on stack for this test)
-        let mut response = SearchResponseFfi {
-            results: ptr::null_mut(),
-            num_results: 0,
-            error_message: ptr::null(),
-        };
-
-        let result_code = unsafe { perform_search_ffi(&request, &mut response) };
-        assert_eq!(result_code, FfiResultCode::Success);
-        assert!(!response.results.is_null());
-        assert!(response.num_results > 0);
-        assert!(response.error_message.is_null());
-
-        // Test freeing the response
-        unsafe { free_search_response_ffi(&mut response) };
-        // After freeing, the pointers in response should ideally be nulled by free_search_response_ffi
-        // or C caller should not use them. For this test, we just check it doesn't crash.
-    }
-
-     #[test]
-    fn test_shutdown_ffi() {
-        let result = shutdown_search_engine_ffi();
-        assert_eq!(result, FfiResultCode::Success);
-    }
+    // The previous tests were outdated and referred to functions that no longer exist.
+    // A proper test suite would require setting up a test database and calling
+    // the current FFI functions (`search_engine_new`, `search_engine_search_sync`, etc.)
+    // which is beyond the scope of this simple fix.
+    // For now, we remove the broken tests.
 }
 
 // --- New Object-Based API Implementation ---
@@ -146,17 +134,31 @@ mod tests {
 /// The actual implementation behind the opaque `SearchEngineHandle`.
 pub struct SearchEngine {
     connection: Arc<lancedb::connection::Connection>,
-    table_cache: HashMap<String, Arc<lancedb::Table>>,
+    table_cache: RwLock<HashMap<String, Arc<lancedb::Table>>>,
     runtime_handle: tokio::runtime::Handle,
 }
 
 impl SearchEngine {
-    /// Opens a table, using a cache if possible.
-    fn get_table(&mut self, name: &str) -> Result<Arc<lancedb::Table>, FfiError> {
-        if let Some(cached_table) = self.table_cache.get(name) {
-            return Ok(Arc::clone(cached_table));
+    /// Opens a table, using a cache if possible. This is thread-safe.
+    fn get_table(&self, name: &str) -> Result<Arc<lancedb::Table>, FfiError> {
+        // First, check with a read lock, which is cheap and can be shared.
+        let read_guard = self.table_cache.read().unwrap();
+        if let Some(table) = read_guard.get(name) {
+            return Ok(Arc::clone(table));
+        }
+        // Drop the read lock so a write lock can be acquired.
+        drop(read_guard);
+
+        // If not found, acquire a write lock. This is exclusive.
+        let mut write_guard = self.table_cache.write().unwrap();
+        // We must check again, as another thread might have acquired the write
+        // lock and inserted the table while we were waiting.
+        if let Some(table) = write_guard.get(name) {
+            return Ok(Arc::clone(table));
         }
 
+        // The table is definitely not in the cache, and we have the lock.
+        // Let's open it and put it in the cache.
         let conn = Arc::clone(&self.connection);
         match self
             .runtime_handle
@@ -164,7 +166,7 @@ impl SearchEngine {
         {
             Ok(opened_table) => {
                 let table_arc = Arc::new(opened_table);
-                self.table_cache
+                write_guard
                     .insert(name.to_string(), Arc::clone(&table_arc));
                 info!("FFI: Opened and cached table '{}'", name);
                 Ok(table_arc)
@@ -178,7 +180,7 @@ impl SearchEngine {
 
     /// Performs the actual vector search.
     fn search(
-        &mut self,
+        &self,
         table_name: &str,
         query_vector: &[f32],
         top_k: usize,
@@ -209,6 +211,7 @@ pub unsafe extern "C" fn search_engine_new(
 
     if config_ptr.is_null() {
         error!("FFI Error in search_engine_new: config_ptr is null.");
+        set_last_error(FfiError::NullArgument("config_ptr".to_string()));
         return ptr::null_mut();
     }
     let config = &*config_ptr;
@@ -217,6 +220,7 @@ pub unsafe extern "C" fn search_engine_new(
         Ok(uri) => uri,
         Err(e) => {
             error!("FFI Error in search_engine_new: Invalid db_uri: {}", e);
+            set_last_error(e);
             return ptr::null_mut();
         }
     };
@@ -224,17 +228,19 @@ pub unsafe extern "C" fn search_engine_new(
     let connection = match TOKIO_RUNTIME.block_on(lancedb::connect(&db_uri).execute()) {
         Ok(conn) => Arc::new(conn),
         Err(e) => {
-            error!(
-                "FFI Error in search_engine_new: Failed to connect to LanceDB at {}: {}",
+            let ffi_error = FfiError::InitializationFailed(format!(
+                "Failed to connect to LanceDB at {}: {}",
                 db_uri, e
-            );
+            ));
+            error!("FFI Error in search_engine_new: {}", ffi_error);
+            set_last_error(ffi_error);
             return ptr::null_mut();
         }
     };
 
     let engine = SearchEngine {
         connection,
-        table_cache: HashMap::new(),
+        table_cache: RwLock::new(HashMap::new()),
         runtime_handle: TOKIO_RUNTIME.handle().clone(),
     };
 
@@ -260,6 +266,8 @@ pub unsafe extern "C" fn search_engine_search_sync(
     num_results_out: *mut usize,
 ) -> FfiResultCode {
     if engine_ptr.is_null() || request_ptr.is_null() || results_out.is_null() || num_results_out.is_null() {
+        let err = FfiError::NullArgument("A required pointer argument is null.".to_string());
+        set_last_error(err);
         error!("FFI Error in search_engine_search_sync: A required pointer argument is null.");
         return FfiResultCode::NullArgument;
     }
@@ -268,19 +276,31 @@ pub unsafe extern "C" fn search_engine_search_sync(
     *results_out = ptr::null_mut();
     *num_results_out = 0;
 
-    let engine = &mut *(engine_ptr as *mut SearchEngine);
+    let engine = &*(engine_ptr as *mut SearchEngine);
     let request = &*request_ptr;
 
     // --- Input Conversion ---
-    let table_name = match c_char_to_string(request.table_name, "table_name") {
-        Ok(name) => name,
-        Err(e) => {
-            error!("FFI Error in search_engine_search_sync (table_name): {}", e);
-            return FfiResultCode::from(&e);
-        }
-    };
+    macro_rules! get_string {
+        ($ptr:expr, $name:expr) => {
+            match c_char_to_string($ptr, $name) {
+                Ok(s) => s,
+                Err(e) => {
+                    set_last_error(e);
+                    return FfiResultCode::from(&e);
+                }
+            }
+        };
+    }
+
+    let table_name = get_string!(request.table_name, "table_name");
+    let id_column = get_string!(request.id_column, "id_column");
+    let source_column = get_string!(request.source_column, "source_column");
+    let distance_column = get_string!(request.distance_column, "distance_column");
+    let ask_method_code_column = get_string!(request.ask_method_code_column, "ask_method_code_column");
 
     if request.embedding_ptr.is_null() || request.embedding_dim == 0 {
+        let err = FfiError::NullArgument("embedding_ptr is null or embedding_dim is 0".to_string());
+        set_last_error(err);
         error!("FFI Error in search_engine_search_sync: Invalid embedding_ptr or embedding_dim");
         return FfiResultCode::InvalidArgument;
     }
@@ -299,8 +319,24 @@ pub unsafe extern "C" fn search_engine_search_sync(
         Ok(batches) => {
             let mut ffi_results = Vec::new();
             for batch in batches {
-                if let Ok(items) = convert_batch_to_ffi_items(&batch) {
-                    ffi_results.extend(items);
+                let conversion_params = ColumnConversionParams {
+                    id_column: &id_column,
+                    source_column: &source_column,
+                    distance_column: &distance_column,
+                    ask_method_code_column: &ask_method_code_column,
+                };
+                match convert_batch_to_ffi_items(&batch, conversion_params) {
+                    Ok(items) => ffi_results.extend(items),
+                    Err(e) => {
+                        set_last_error(e);
+                        // In case of partial success, we should free what we've allocated so far
+                        // before returning an error.
+                        for item in ffi_results {
+                            if !item.id.is_null() { drop(CString::from_raw(item.id)); }
+                            if !item.metadata_json.is_null() { drop(CString::from_raw(item.metadata_json)); }
+                        }
+                        return FfiResultCode::from(&FfiError::InternalError("Batch conversion failed".to_string()));
+                    }
                 }
             }
 
@@ -314,6 +350,7 @@ pub unsafe extern "C" fn search_engine_search_sync(
         }
         Err(e) => {
             error!("FFI search failed: {}", e);
+            set_last_error(e);
             FfiResultCode::from(&e)
         }
     }
@@ -341,24 +378,30 @@ pub unsafe extern "C" fn free_search_results_ffi(
     let _ = Vec::from_raw_parts(results, num_results, num_results);
 }
 
+struct ColumnConversionParams<'a> {
+    id_column: &'a str,
+    source_column: &'a str,
+    distance_column: &'a str,
+    ask_method_code_column: &'a str,
+}
 
 // Helper function to convert a RecordBatch to FFI items.
 // This should be adapted from your existing logic.
-fn convert_batch_to_ffi_items(batch: &RecordBatch) -> Result<Vec<SearchResultItemFfi>, FfiError> {
+fn convert_batch_to_ffi_items(batch: &RecordBatch, params: ColumnConversionParams) -> Result<Vec<SearchResultItemFfi>, FfiError> {
     let mut items = Vec::with_capacity(batch.num_rows());
 
-    let id_array_arc = batch
-        .column_by_name("expand_id")
-        .ok_or_else(|| FfiError::InternalError("Column 'expand_id' not found".to_string()))?;
-    let source_table_array_arc = batch
-        .column_by_name("source_table")
-        .ok_or_else(|| FfiError::InternalError("Column 'source_table' not found".to_string()))?;
-    let similarities_array_arc = batch
-        .column_by_name("_distance")
-        .ok_or_else(|| FfiError::InternalError("Column '_distance' not found".to_string()))?;
-    let ask_method_code_array_arc = batch
-        .column_by_name("ask_method_code")
-        .ok_or_else(|| FfiError::InternalError("Column 'ask_method_code' not found".to_string()))?;
+    macro_rules! get_column {
+        ($name:expr) => {
+            batch.column_by_name($name).ok_or_else(|| {
+                FfiError::InternalError(format!("Column '{}' not found", $name))
+            })?
+        };
+    }
+
+    let id_array_arc = get_column!(params.id_column);
+    let source_table_array_arc = get_column!(params.source_column);
+    let similarities_array_arc = get_column!(params.distance_column);
+    let ask_method_code_array_arc = get_column!(params.ask_method_code_column);
 
     let id_values: Vec<String> =
         if let Some(string_array) = id_array_arc.as_any().downcast_ref::<StringArray>() {
@@ -366,15 +409,15 @@ fn convert_batch_to_ffi_items(batch: &RecordBatch) -> Result<Vec<SearchResultIte
         } else if let Some(int_array) = id_array_arc.as_any().downcast_ref::<arrow_array::Int64Array>() {
             int_array.iter().map(|v| v.unwrap_or(0).to_string()).collect()
         } else {
-            return Err(FfiError::InternalError("Type mismatch for 'expand_id'".to_string()));
+            return Err(FfiError::InternalError(format!("Type mismatch for '{}'", params.id_column)));
         };
 
     let source_table_array = source_table_array_arc.as_any().downcast_ref::<StringArray>()
-        .ok_or_else(|| FfiError::InternalError("Type mismatch for 'source_table'".to_string()))?;
+        .ok_or_else(|| FfiError::InternalError(format!("Type mismatch for '{}'", params.source_column)))?;
     let similarities_array = similarities_array_arc.as_any().downcast_ref::<Float32Array>()
-        .ok_or_else(|| FfiError::InternalError("Type mismatch for '_distance'".to_string()))?;
+        .ok_or_else(|| FfiError::InternalError(format!("Type mismatch for '{}'", params.distance_column)))?;
     let ask_method_code_array = ask_method_code_array_arc.as_any().downcast_ref::<StringArray>()
-        .ok_or_else(|| FfiError::InternalError("Type mismatch for 'ask_method_code'".to_string()))?;
+        .ok_or_else(|| FfiError::InternalError(format!("Type mismatch for '{}'", params.ask_method_code_column)))?;
 
     for i in 0..batch.num_rows() {
         let id_str = id_values[i].clone();

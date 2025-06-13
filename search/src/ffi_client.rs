@@ -23,6 +23,10 @@ extern "C" {
         num_results_out: *mut usize,
     ) -> FfiResultCode;
     fn free_search_results_ffi(results: *mut SearchResultItemFfi, num_results: usize);
+    
+    // New FFI functions for detailed error handling.
+    fn lancedb_ffi_get_last_error() -> *mut i8; // Corresponds to c_char
+    fn lancedb_ffi_free_string(s: *mut i8);
 }
 
 // Helper struct to deserialize metadata_json from FFI
@@ -82,6 +86,12 @@ impl LanceDbFfiClient {
         let mut embedding_vec = request.question_embedding;
         let c_table_name = CString::new(request.table_name.as_str())
             .map_err(|e| SearchServiceError::InternalError(format!("Invalid table name: {}", e)))?;
+        
+        // Define the column names to be passed to the FFI layer.
+        let c_id_column = CString::new("expand_id").unwrap();
+        let c_source_column = CString::new("source_table").unwrap();
+        let c_distance_column = CString::new("_distance").unwrap();
+        let c_ask_method_code_column = CString::new("ask_method_code").unwrap();
 
         embedding_vec.shrink_to_fit();
 
@@ -90,6 +100,10 @@ impl LanceDbFfiClient {
             embedding_dim: embedding_vec.len() as u32,
             top_k: request.top_k as u32,
             table_name: c_table_name.as_ptr(),
+            id_column: c_id_column.as_ptr(),
+            source_column: c_source_column.as_ptr(),
+            distance_column: c_distance_column.as_ptr(),
+            ask_method_code_column: c_ask_method_code_column.as_ptr(),
         };
         
         let mut results_ptr: *mut SearchResultItemFfi = ptr::null_mut();
@@ -112,7 +126,19 @@ impl LanceDbFfiClient {
                 conversion_result
             }
             _ => {
-                let error_message = format!("FFI search failed with code: {:?}", result_code);
+                let mut error_message = format!("FFI search failed with code: {:?}", result_code);
+                
+                // Attempt to get a more detailed error message from the FFI layer.
+                let ffi_error_str_ptr = unsafe { lancedb_ffi_get_last_error() };
+                if !ffi_error_str_ptr.is_null() {
+                    unsafe {
+                        let detailed_error = CStr::from_ptr(ffi_error_str_ptr).to_string_lossy().into_owned();
+                        error_message = format!("{} - Details: {}", error_message, detailed_error);
+                        // Free the string provided by the FFI layer.
+                        lancedb_ffi_free_string(ffi_error_str_ptr);
+                    }
+                }
+
                 error!("{}", error_message);
                 // Ensure we still attempt to free memory if the FFI layer allocated it before failing.
                 unsafe {
