@@ -63,6 +63,8 @@ pub enum FfiError {
     SearchFailed(String),
     #[error("Internal FFI error: {0}")]
     InternalError(String),
+    #[error("A lock was poisoned: {0}")]
+    LockPoisoned(String),
 }
 
 impl From<&FfiError> for FfiResultCode {
@@ -76,6 +78,7 @@ impl From<&FfiError> for FfiResultCode {
             FfiError::InitializationFailed(_) => FfiResultCode::InitializationFailed,
             FfiError::SearchFailed(_) => FfiResultCode::SearchFailed,
             FfiError::InternalError(_) => FfiResultCode::InternalError,
+            FfiError::LockPoisoned(_) => FfiResultCode::InternalError,
         }
     }
 }
@@ -131,7 +134,9 @@ impl SearchEngine {
     /// Opens a table, using a cache if possible. This is thread-safe.
     fn get_table(&self, name: &str) -> Result<Arc<lancedb::Table>, FfiError> {
         // First, check with a read lock, which is cheap and can be shared.
-        let read_guard = self.table_cache.read().unwrap();
+        let read_guard = self.table_cache.read().map_err(|e| {
+            FfiError::LockPoisoned(format!("Table cache read lock was poisoned: {}", e))
+        })?;
         if let Some(table) = read_guard.get(name) {
             return Ok(Arc::clone(table));
         }
@@ -139,7 +144,9 @@ impl SearchEngine {
         drop(read_guard);
 
         // If not found, acquire a write lock. This is exclusive.
-        let mut write_guard = self.table_cache.write().unwrap();
+        let mut write_guard = self.table_cache.write().map_err(|e| {
+            FfiError::LockPoisoned(format!("Table cache write lock was poisoned: {}", e))
+        })?;
         // We must check again, as another thread might have acquired the write
         // lock and inserted the table while we were waiting.
         if let Some(table) = write_guard.get(name) {
