@@ -591,14 +591,4 @@ pub(crate) struct VertexResponse {
     pub predictions: Vec<VertexPrediction>,
 }
 
-// Search API Types
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub(crate) struct SearchQuery {
-    #[schema(example = "What is the capital of France?")]
-    pub question: String,
-    #[schema(example = "general")]
-    pub table_name: String,
-    #[schema(example = 10)]
-    pub top_k: i32,
-}
