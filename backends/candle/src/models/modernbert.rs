@@ -37,7 +37,7 @@ pub struct ModernBertConfig {
     pub mlp_bias: Option<bool>,
     pub mlp_dropout: Option<f64>,
     pub decoder_bias: Option<bool>,
-    pub classifier_pooling: Option<String>,
+    pub classifier_pooling: Option<Pool>,
     pub classifier_dropout: Option<f64>,
     pub classifier_bias: Option<bool>,
     pub classifier_activation: HiddenAct,
@@ -120,11 +120,7 @@ impl ModernBertMLP {
             hidden_states.narrow(D::Minus1, self.intermediate_size, self.intermediate_size)?;
 
         let input = if let Some(activation) = &self.activation {
-            match activation {
-                HiddenAct::Gelu => input.gelu(),
-                HiddenAct::Relu => input.relu(),
-                HiddenAct::Swiglu => input.silu(),
-            }
+            activation.forward(&input)
         } else {
             Ok(input)
         };
@@ -484,7 +480,7 @@ impl ModernBertModel {
     pub fn load(vb: VarBuilder, config: &ModernBertConfig, model_type: ModelType) -> Result<Self> {
         let (pool, classifier) = match model_type {
             ModelType::Classifier => {
-                let pool = Pool::Cls;
+                let pool: Pool = config.classifier_pooling.clone().unwrap_or(Pool::Cls);
 
                 let classifier: Box<dyn ClassificationHead + Send> =
                     Box::new(ModernBertClassificationHead::load(vb.clone(), config)?);

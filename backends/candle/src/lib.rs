@@ -13,13 +13,13 @@ use crate::compute_cap::{
 use crate::models::{
     BertConfig, BertModel, DistilBertConfig, DistilBertModel, GTEConfig, GTEModel, JinaBertModel,
     JinaCodeBertModel, MPNetConfig, MPNetModel, MistralConfig, Model, ModernBertConfig,
-    ModernBertModel, NomicBertModel, NomicConfig, Qwen2Config,
+    ModernBertModel, NomicBertModel, NomicConfig, Qwen2Config, Qwen3Config, Qwen3Model,
 };
 #[cfg(feature = "cuda")]
 use crate::models::{
     FlashBertModel, FlashDistilBertModel, FlashGTEModel, FlashJinaBertModel,
     FlashJinaCodeBertModel, FlashMistralModel, FlashModernBertModel, FlashNomicBertModel,
-    FlashQwen2Model,
+    FlashQwen2Model, FlashQwen3Model,
 };
 use anyhow::Context;
 use candle::{DType, Device};
@@ -103,6 +103,8 @@ enum Config {
     Gte(GTEConfig),
     #[allow(dead_code)]
     Qwen2(Qwen2Config),
+    #[allow(dead_code)]
+    Qwen3(Qwen3Config),
     #[serde(rename = "mpnet")]
     MPNet(MPNetConfig),
     #[serde(rename(deserialize = "modernbert"))]
@@ -273,6 +275,10 @@ impl CandleBackend {
                 "Qwen2 is only supported on Cuda devices in fp16 with flash attention enabled"
                     .to_string(),
             )),
+            (Config::Qwen3(config), Device::Cpu | Device::Metal(_)) => {
+                tracing::info!("Starting Qwen3 model on {:?}", device);
+                Ok(Box::new(Qwen3Model::load(vb, &config, model_type).s()?))
+            }
             (Config::MPNet(config), _) => {
                 tracing::info!("Starting MPNet model on {:?}", device);
                 Ok(Box::new(MPNetModel::load(vb, &config, model_type).s()?))
@@ -445,6 +451,20 @@ impl CandleBackend {
                 Ok(Box::new(
                     FlashQwen2Model::load(vb, &config, model_type).s()?,
                 ))
+            }
+            #[cfg(feature = "cuda")]
+            (Config::Qwen3(config), Device::Cuda(_)) => {
+                if dtype != DType::F16
+                    || !cfg!(any(feature = "flash-attn", feature = "flash-attn-v1"))
+                {
+                    tracing::info!("Starting Qwen3 model on {:?}", device);
+                    Ok(Box::new(Qwen3Model::load(vb, &config, model_type).s()?))
+                } else {
+                    tracing::info!("Starting FlashQwen3 model on {:?}", device);
+                    Ok(Box::new(
+                        FlashQwen3Model::load(vb, &config, model_type).s()?,
+                    ))
+                }
             }
         };
 

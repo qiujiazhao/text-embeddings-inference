@@ -1,16 +1,19 @@
 use crate::flash_attn::flash_attn_varlen;
 use crate::layers::{get_cos_sin, get_inv_freqs, HiddenAct, Linear, RMSNorm};
-use crate::models::{MistralConfig, Model};
+use crate::models::{Model, Qwen3Config};
 use candle::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Embedding, Module, VarBuilder};
 use candle_rotary::apply_rotary_inplace;
 use text_embeddings_backend_core::{Batch, ModelType, Pool};
 
-struct MistralAttention {
-    qkv_linear: Linear,
+struct Qwen3Attention {
+    q_proj: Linear,
+    k_proj: Linear,
+    v_proj: Linear,
     o_proj: Linear,
 
-    window_size_left: Option<usize>,
+    q_norm: RMSNorm,
+    k_norm: RMSNorm,
 
     num_attention_heads: usize,
     num_key_value_heads: usize,
@@ -21,39 +24,76 @@ struct MistralAttention {
     span: tracing::Span,
 }
 
-impl MistralAttention {
-    pub fn load(vb: VarBuilder, config: &MistralConfig) -> Result<Self> {
-        let window_size_left = config.sliding_window;
+impl Qwen3Attention {
+    pub fn load(vb: VarBuilder, config: &Qwen3Config) -> Result<Self> {
+        if config.use_sliding_window {
+            candle::bail!("Sliding window is not supported for Qwen3",);
+        }
+
         let num_attention_heads = config.num_attention_heads;
-        let attention_head_size = config.hidden_size / config.num_attention_heads;
+        let attention_head_size = config
+            .head_dim
+            .unwrap_or(config.hidden_size / config.num_attention_heads);
         let num_key_value_heads = config.num_key_value_heads;
         let hidden_size = config.hidden_size;
 
-        let query_weight = vb.pp("q_proj").get((hidden_size, hidden_size), "weight")?;
+        let query_weight = vb.pp("q_proj").get(
+            (num_attention_heads * attention_head_size, hidden_size),
+            "weight",
+        )?;
+        let query_bias = if config.attention_bias {
+            Some(vb.pp("q_proj").get(hidden_size, "bias")?)
+        } else {
+            None
+        };
+        let q_proj = Linear::new(query_weight, query_bias, None);
 
         let key_weight = vb.pp("k_proj").get(
             (num_key_value_heads * attention_head_size, hidden_size),
             "weight",
         )?;
+        let key_bias = if config.attention_bias {
+            Some(
+                vb.pp("k_proj")
+                    .get(num_key_value_heads * attention_head_size, "bias")?,
+            )
+        } else {
+            None
+        };
+        let k_proj = Linear::new(key_weight, key_bias, None);
 
         let value_weight = vb.pp("v_proj").get(
             (num_key_value_heads * attention_head_size, hidden_size),
             "weight",
         )?;
+        let value_bias = if config.attention_bias {
+            Some(
+                vb.pp("v_proj")
+                    .get(num_key_value_heads * attention_head_size, "bias")?,
+            )
+        } else {
+            None
+        };
+        let v_proj = Linear::new(value_weight, value_bias, None);
 
-        let qkv_weight = Tensor::cat(&[&query_weight, &key_weight, &value_weight], 0)?;
-        let qkv_linear = Linear::new(qkv_weight, None, None);
-
-        let o_proj_weight = vb.pp("o_proj").get((hidden_size, hidden_size), "weight")?;
-
+        let o_proj_weight = vb.pp("o_proj").get(
+            (hidden_size, num_attention_heads * attention_head_size),
+            "weight",
+        )?;
         let o_proj = Linear::new(o_proj_weight, None, None);
+
+        let q_norm = RMSNorm::load(vb.pp("q_norm"), attention_head_size, config.rms_norm_eps)?;
+        let k_norm = RMSNorm::load(vb.pp("k_norm"), attention_head_size, config.rms_norm_eps)?;
 
         let softmax_scale = (1. / (attention_head_size as f64).sqrt()) as f32;
 
         Ok(Self {
-            qkv_linear,
+            q_proj,
+            k_proj,
+            v_proj,
             o_proj,
-            window_size_left,
+            q_norm,
+            k_norm,
             num_attention_heads,
             num_key_value_heads,
             attention_head_size,
@@ -72,24 +112,39 @@ impl MistralAttention {
     ) -> Result<Tensor> {
         let _enter = self.span.enter();
 
-        let qkv = self.qkv_linear.forward(hidden_states)?;
+        let q = self.q_proj.forward(hidden_states)?;
+        let k = self.k_proj.forward(hidden_states)?;
+        let v = self.v_proj.forward(hidden_states)?;
 
-        // Reshape to [tokens, heads, head_size]
-        let mut new_qkv_shape = qkv.dims().to_vec();
-        new_qkv_shape.pop();
-        new_qkv_shape.push(self.num_attention_heads + 2 * self.num_key_value_heads);
-        new_qkv_shape.push(self.attention_head_size);
+        // Reshape to [batch, seq_len, heads, head_dim]
+        let input_dims = hidden_states.dims();
+        let input_shape = &input_dims[..input_dims.len() - 1];
 
-        let qkv = qkv.reshape(new_qkv_shape)?;
-
-        // Split qkv tensor
-        let q = qkv.narrow(1, 0, self.num_attention_heads)?;
-        let k = qkv.narrow(1, self.num_attention_heads, self.num_key_value_heads)?;
-        let v = qkv.narrow(
-            1,
-            self.num_attention_heads + self.num_key_value_heads,
-            self.num_key_value_heads,
+        let q = q.reshape(
+            [
+                input_shape,
+                &[self.num_attention_heads, self.attention_head_size],
+            ]
+            .concat(),
         )?;
+        let k = k.reshape(
+            [
+                input_shape,
+                &[self.num_key_value_heads, self.attention_head_size],
+            ]
+            .concat(),
+        )?;
+        let v = v.reshape(
+            [
+                input_shape,
+                &[self.num_key_value_heads, self.attention_head_size],
+            ]
+            .concat(),
+        )?;
+
+        // Apply normalization layers
+        let (q, _res) = self.q_norm.forward(&q, None)?;
+        let (k, _res) = self.k_norm.forward(&k, None)?;
 
         apply_rotary_inplace(&q, &k, &cos, &sin, true)?;
 
@@ -103,8 +158,8 @@ impl MistralAttention {
             max_s,
             max_s,
             self.softmax_scale,
-            true,
-            self.window_size_left,
+            false,
+            None,
             None,
         )?;
         let attention = attention.flatten_from(candle::D::Minus2)?;
@@ -113,7 +168,7 @@ impl MistralAttention {
     }
 }
 
-struct MistralMLP {
+struct Qwen3MLP {
     gate_up_proj: Linear,
     down_proj: Linear,
 
@@ -123,8 +178,8 @@ struct MistralMLP {
     span: tracing::Span,
 }
 
-impl MistralMLP {
-    pub fn load(vb: VarBuilder, config: &MistralConfig) -> Result<Self> {
+impl Qwen3MLP {
+    pub fn load(vb: VarBuilder, config: &Qwen3Config) -> Result<Self> {
         let intermediate_size = config.intermediate_size;
 
         let gate_proj_weight = vb
@@ -165,19 +220,19 @@ impl MistralMLP {
     }
 }
 
-struct MistralLayer {
-    attention: MistralAttention,
-    mlp: MistralMLP,
+struct Qwen3Layer {
+    attention: Qwen3Attention,
+    mlp: Qwen3MLP,
     input_layer_norm: RMSNorm,
     post_attention_layer_norm: RMSNorm,
 
     span: tracing::Span,
 }
 
-impl MistralLayer {
-    pub fn load(vb: VarBuilder, config: &MistralConfig) -> Result<Self> {
-        let attention = MistralAttention::load(vb.pp("self_attn"), config)?;
-        let mlp = MistralMLP::load(vb.pp("mlp"), config)?;
+impl Qwen3Layer {
+    pub fn load(vb: VarBuilder, config: &Qwen3Config) -> Result<Self> {
+        let attention = Qwen3Attention::load(vb.pp("self_attn"), config)?;
+        let mlp = Qwen3MLP::load(vb.pp("mlp"), config)?;
 
         let input_layer_norm = RMSNorm::load(
             vb.pp("input_layernorm"),
@@ -223,9 +278,9 @@ impl MistralLayer {
     }
 }
 
-pub struct FlashMistralModel {
+pub struct FlashQwen3Model {
     embeddings: Embedding,
-    layers: Vec<MistralLayer>,
+    layers: Vec<Qwen3Layer>,
     norm: RMSNorm,
     cos_cache: Tensor,
     sin_cache: Tensor,
@@ -235,22 +290,30 @@ pub struct FlashMistralModel {
     span: tracing::Span,
 }
 
-impl FlashMistralModel {
-    pub fn load(vb: VarBuilder, config: &MistralConfig, model_type: ModelType) -> Result<Self> {
+impl FlashQwen3Model {
+    pub fn load(vb: VarBuilder, config: &Qwen3Config, model_type: ModelType) -> Result<Self> {
         match vb.device() {
             Device::Cuda(_) => {}
-            _ => candle::bail!("FlashMistral requires Cuda"),
+            _ => candle::bail!("FlashQwen3 requires Cuda"),
         }
 
         if vb.dtype() != DType::F16 {
-            candle::bail!("FlashMistral requires DType::F16")
+            candle::bail!("FlashQwen3 requires DType::F16")
         }
 
         let pool = match model_type {
             ModelType::Classifier => {
-                candle::bail!("`classifier` model type is not supported for Mistral")
+                candle::bail!("`classifier` model type is not supported for Qwen3")
             }
             ModelType::Embedding(pool) => pool,
+        };
+
+        // The Qwen3-Reranker models contain the `model` key
+        // https://huggingface.co/collections/Qwen/qwen3-reranker-6841b22d0192d7ade9cdefea
+        let vb = if vb.contains_tensor("model.embed_tokens.weight") {
+            vb.pp("model")
+        } else {
+            vb
         };
 
         let embeddings = Embedding::new(
@@ -260,7 +323,7 @@ impl FlashMistralModel {
         );
 
         let layers = (0..config.num_hidden_layers)
-            .map(|index| MistralLayer::load(vb.pp(format!("layers.{index}")), config))
+            .map(|index| Qwen3Layer::load(vb.pp(format!("layers.{index}")), config))
             .collect::<Result<Vec<_>>>()?;
 
         let norm = RMSNorm::load(vb.pp("norm"), config.hidden_size, config.rms_norm_eps)?;
@@ -438,10 +501,11 @@ impl FlashMistralModel {
     }
 }
 
-impl Model for FlashMistralModel {
+impl Model for FlashQwen3Model {
     fn is_padded(&self) -> bool {
         false
     }
+
     fn embed(&self, batch: Batch) -> Result<(Option<Tensor>, Option<Tensor>)> {
         self.forward(batch)
     }
