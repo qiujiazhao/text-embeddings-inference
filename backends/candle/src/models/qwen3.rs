@@ -2,7 +2,7 @@ use crate::layers::{
     apply_rotary, get_cos_sin, get_cublas_lt_wrapper, get_inv_freqs, HiddenAct, Linear, RMSNorm,
 };
 use crate::models::Model;
-use candle::{Device, IndexOp, Result, Tensor, D};
+use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{Embedding, Module, VarBuilder};
 use serde::Deserialize;
 use text_embeddings_backend_core::{Batch, ModelType, Pool};
@@ -23,6 +23,7 @@ pub struct Qwen3Config {
     pub rope_theta: f32,
     pub sliding_window: Option<usize>,
     pub use_sliding_window: bool,
+    pub eos_token_id: usize,
 }
 
 struct Qwen3Attention {
@@ -164,8 +165,8 @@ impl Qwen3Attention {
             .concat(),
         )?;
 
-        let (q, _res) = self.q_norm.forward(&q, None)?;
-        let (k, _res) = self.k_norm.forward(&k, None)?;
+        let (q, _) = self.q_norm.forward(&q, None)?;
+        let (k, _) = self.k_norm.forward(&k, None)?;
 
         let q = q.transpose(1, 2)?;
         let k = k.transpose(1, 2)?;
@@ -355,16 +356,21 @@ impl Qwen3Layer {
     ) -> Result<Tensor> {
         let _enter = self.span.enter();
 
-        let (normed_hidden_states, res) = self.input_layer_norm.forward(hidden_states, None)?;
+        let (normed_hidden_states, residual) =
+            self.input_layer_norm.forward(hidden_states, None)?;
+
         let attn_output =
             self.attention
                 .forward(&normed_hidden_states, attention_bias, cos, sin)?;
+
         let (normed_attn_res_output, attn_res) = self
             .post_attention_layer_norm
-            .forward(&attn_output, Some(&res))?;
+            .forward(&attn_output, Some(&residual))?;
+
         let mlp_output = self.mlp.forward(&normed_attn_res_output)?;
 
         let output = (&mlp_output + &attn_res)?;
+
         Ok(output)
     }
 }
@@ -376,8 +382,11 @@ pub struct Qwen3Model {
     rotary_cache: (Tensor, Tensor),
     rotary_dim: usize,
     pool: Pool,
-    pub device: Device,
     num_attention_heads: usize,
+    pad_token_id: u32,
+
+    dtype: DType,
+    device: Device,
 
     span: tracing::Span,
 }
@@ -427,10 +436,39 @@ impl Qwen3Model {
             rotary_cache,
             rotary_dim,
             pool,
-            device: vb.device().clone(),
+            pad_token_id: config.eos_token_id as u32,
             num_attention_heads: config.num_attention_heads,
+            dtype: vb.dtype(),
+            device: vb.device().clone(),
             span: tracing::span!(tracing::Level::TRACE, "model"),
         })
+    }
+
+    fn get_causal_attention_bias(&self, attention_bias: Tensor) -> Result<Tensor> {
+        let (bs, dim, seq_len, _) = attention_bias.dims4()?;
+
+        let mask: Vec<u8> = (0..seq_len)
+            .flat_map(|i| (0..seq_len).map(move |j| (j > i) as u8))
+            .collect();
+
+        let device = attention_bias.device();
+        let causal_mask = Tensor::from_slice(&mask, (seq_len, seq_len), device)?;
+        let causal_mask = causal_mask.expand(&[bs, dim, seq_len, seq_len])?;
+
+        let min_value = match self.dtype {
+            DType::F32 => f32::MIN,
+            _ => -65504.0, // f16 minimum value
+        };
+
+        let negatives =
+            Tensor::full(min_value, attention_bias.shape(), device)?.to_dtype(self.dtype)?;
+        let zeros = Tensor::zeros_like(&attention_bias)?.to_dtype(self.dtype)?;
+
+        let causal_mask = causal_mask
+            .where_cond(&negatives, &zeros)?
+            .to_device(device)?;
+
+        attention_bias.broadcast_add(&causal_mask)
     }
 
     pub fn forward(&self, batch: Batch) -> Result<(Option<Tensor>, Option<Tensor>)> {
@@ -441,92 +479,87 @@ impl Qwen3Model {
 
         let shape = (batch_size, max_length);
 
-        let (input_ids, position_ids, input_lengths, attention_bias, _attention_mask) =
-            if batch_size > 1 {
-                // Prepare padded batch
-                let elems = batch_size * max_length;
+        let (input_ids, position_ids, input_lengths, attention_bias) = if batch_size > 1 {
+            // Prepare padded batch
+            let elems = batch_size * max_length;
 
-                let mut input_ids = Vec::with_capacity(elems);
-                let mut position_ids = Vec::with_capacity(elems);
-                let mut attention_mask = Vec::with_capacity(elems);
-                let mut attention_bias = Vec::with_capacity(elems);
-                let mut input_lengths = Vec::with_capacity(batch_size);
-                let mut masking = false;
+            let mut input_ids = Vec::with_capacity(elems);
+            let mut position_ids = Vec::with_capacity(elems);
+            let mut attention_bias = Vec::with_capacity(elems);
+            let mut input_lengths = Vec::with_capacity(batch_size);
+            let mut masking = false;
 
-                for i in 0..batch_size {
-                    let start = batch.cumulative_seq_lengths[i] as usize;
-                    let end = batch.cumulative_seq_lengths[i + 1] as usize;
-                    let seq_length = end - start;
-                    input_lengths.push(seq_length);
+            for i in 0..batch_size {
+                let start = batch.cumulative_seq_lengths[i] as usize;
+                let end = batch.cumulative_seq_lengths[i + 1] as usize;
+                let seq_length = end - start;
+                input_lengths.push(seq_length);
 
-                    // Input ids
-                    for j in start..end {
-                        input_ids.push(batch.input_ids[j]);
-                        position_ids.push(batch.position_ids[j]);
-                        attention_mask.push(1.0_f32);
-                        attention_bias.push(0.0);
-                    }
-
-                    // Pad to max_length
-                    for _ in seq_length..max_length {
-                        input_ids.push(0);
+                // Left padding for Qwen3-Embedding (pad at the beginning)
+                let padding = max_length - seq_length;
+                if padding > 0 {
+                    masking = true;
+                    for _ in 0..padding {
+                        input_ids.push(self.pad_token_id);
                         position_ids.push(0);
-                        attention_mask.push(0.0_f32);
                         attention_bias.push(f32::NEG_INFINITY);
-                        masking = true;
                     }
                 }
 
-                let input_ids = Tensor::from_vec(input_ids, shape, &self.device)?;
-                let position_ids = Tensor::from_vec(position_ids, shape, &self.device)?;
-                let attention_mask = if masking {
-                    Some(Tensor::from_vec(attention_mask, shape, &self.device)?)
-                } else {
-                    None
-                };
+                // Then add the actual sequence
+                for j in start..end {
+                    input_ids.push(batch.input_ids[j]);
+                    position_ids.push(batch.position_ids[j]);
+                    attention_bias.push(0.0);
+                }
+            }
 
-                let attention_bias = if masking {
-                    let attention_bias = Tensor::from_vec(
-                        attention_bias,
-                        (batch_size, 1, 1, max_length),
-                        &self.device,
-                    )?;
-                    // Broadcast once instead of at every layer
-                    let attention_bias = attention_bias
-                        .broadcast_as((
-                            batch_size,
-                            self.num_attention_heads,
-                            max_length,
-                            max_length,
-                        ))?
-                        .contiguous()?;
-                    Some(attention_bias)
-                } else {
-                    None
-                };
+            let input_ids = Tensor::from_vec(input_ids, shape, &self.device)?;
+            let position_ids = Tensor::from_vec(position_ids, shape, &self.device)?;
 
-                (
-                    input_ids,
-                    position_ids,
-                    input_lengths,
-                    attention_bias,
-                    attention_mask,
-                )
+            let attention_bias = if masking {
+                let attention_bias =
+                    Tensor::from_vec(attention_bias, (batch_size, 1, 1, max_length), &self.device)?
+                        .to_dtype(self.dtype)?;
+                // Broadcast once instead of at every layer
+                let attention_bias = attention_bias
+                    .broadcast_as((batch_size, self.num_attention_heads, max_length, max_length))?
+                    .contiguous()?;
+                Some(attention_bias)
             } else {
-                let input_ids = Tensor::from_vec(
-                    batch.input_ids.clone(),
-                    (1, batch.input_ids.len()),
-                    &self.device,
-                )?;
-                let position_ids = Tensor::from_vec(
-                    batch.position_ids.clone(),
-                    (1, batch.position_ids.len()),
-                    &self.device,
-                )?;
-                let input_lengths = vec![batch.input_ids.len()];
-
-                (input_ids, position_ids, input_lengths, None, None)
+                None
             };
+
+            (input_ids, position_ids, input_lengths, attention_bias)
+        } else {
+            let input_ids = Tensor::from_vec(
+                batch.input_ids.clone(),
+                (1, batch.input_ids.len()),
+                &self.device,
+            )?;
+            let position_ids = Tensor::from_vec(
+                batch.position_ids.clone(),
+                (1, batch.position_ids.len()),
+                &self.device,
+            )?;
+            let input_lengths = vec![batch.input_ids.len()];
+
+            let seq_len = batch.input_ids.len();
+            // Create attention bias for causal masking even for single sequences
+            let attention_bias = Tensor::zeros(
+                (1, self.num_attention_heads, seq_len, seq_len),
+                self.dtype,
+                &self.device,
+            )?;
+
+            (input_ids, position_ids, input_lengths, Some(attention_bias))
+        };
+
+        let attention_bias = if let Some(attn_bias) = attention_bias {
+            Some(self.get_causal_attention_bias(attn_bias)?)
+        } else {
+            None
+        };
 
         let mut hidden_states = self.embeddings.forward(&input_ids)?;
 
@@ -583,14 +616,16 @@ impl Qwen3Model {
                             .iter()
                             .map(|&i| {
                                 let i = i as usize;
-                                let last_token_idx = input_lengths[i] - 1;
+                                // With left padding, the last token is always at max_length - 1
+                                let last_token_idx = max_length - 1;
                                 outputs.i((i, last_token_idx))?.unsqueeze(0)
                             })
                             .collect();
 
                         Some(Tensor::cat(&results?, 0)?)
                     } else {
-                        let last_idx = input_lengths[0] - 1;
+                        // For single inference, use the actual last token position from cumulative_seq_lengths
+                        let last_idx = batch.cumulative_seq_lengths[1] as usize - 1;
                         Some(outputs.i((0, last_idx))?.unsqueeze(0)?)
                     }
                 }
@@ -603,7 +638,9 @@ impl Qwen3Model {
                                 let i = i as usize;
                                 let length = input_lengths[i];
 
-                                let embeddings = outputs.i((i, ..length))?;
+                                // With left padding, actual tokens are at the end
+                                let padding = max_length - length;
+                                let embeddings = outputs.i((i, padding..))?;
                                 let sum = embeddings.sum_keepdim(0)?;
                                 sum / (length as f64)
                             })

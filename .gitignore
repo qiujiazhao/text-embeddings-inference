@@ -2,3 +2,5 @@
 target
 lance_db_data
 .DS_Store
+data/
+__pycache__/

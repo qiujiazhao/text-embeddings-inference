@@ -547,6 +547,7 @@ async fn similarity(
         truncation_direction: parameters.truncation_direction,
         prompt_name: parameters.prompt_name,
         normalize: false,
+        dimensions: None,
     };
 
     // Get embeddings
@@ -614,6 +615,7 @@ async fn embed(
                     req.truncation_direction.into(),
                     req.prompt_name,
                     req.normalize,
+                    req.dimensions,
                     permit,
                 )
                 .await
@@ -682,6 +684,7 @@ async fn embed(
                             req.truncation_direction.into(),
                             prompt_name,
                             req.normalize,
+                            req.dimensions,
                             permit,
                         )
                         .await
@@ -1159,6 +1162,7 @@ async fn openai_embed(
                     tokenizers::TruncationDirection::Right,
                     None,
                     true,
+                    req.dimensions,
                     permit,
                 )
                 .await
@@ -1231,6 +1235,7 @@ async fn openai_embed(
                             tokenizers::TruncationDirection::Right,
                             None,
                             true,
+                            req.dimensions,
                             permit,
                         )
                         .await
