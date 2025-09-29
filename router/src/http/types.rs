@@ -1,7 +1,7 @@
 use crate::ErrorType;
 use serde::de::{SeqAccess, Visitor};
 use serde::{de, Deserialize, Deserializer, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fmt::Formatter;
 use text_embeddings_core::tokenization::EncodingInput;
 use utoipa::openapi::{RefOr, Schema};
@@ -477,6 +477,39 @@ pub(crate) struct SparseValue {
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct EmbedSparseResponse(pub Vec<Vec<SparseValue>>);
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct VectorSearchRequest {
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub text: Option<String>,
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub embedding: Option<Vec<f32>>,
+    #[serde(default)]
+    #[schema(default = "false", example = "false", nullable = true)]
+    pub truncate: Option<bool>,
+    #[serde(default)]
+    #[schema(default = "right", example = "right")]
+    pub truncation_direction: TruncationDirection,
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub prompt_name: Option<String>,
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub top_k: Option<usize>,
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub filter: Option<String>,
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub columns: Option<Vec<String>>,
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub vector_column: Option<String>,
+    #[schema(default = "null", example = "null", nullable = true)]
+    pub with_row_id: Option<bool>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[schema(example = json!({"results": [{"id": 1, "_distance": 0.0}]}))]
+pub(crate) struct VectorSearchResponse {
+    #[schema(value_type = Vec<Object>)]
+    pub results: Vec<Value>,
+}
 
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct EmbedAllRequest {

@@ -6,9 +6,10 @@ use crate::http::types::{
     OpenAICompatUsage, PredictInput, PredictRequest, PredictResponse, Prediction, Rank,
     RerankRequest, RerankResponse, Sequence, SimilarityInput, SimilarityParameters,
     SimilarityRequest, SimilarityResponse, SimpleToken, SparseValue, TokenizeInput,
-    TokenizeRequest, TokenizeResponse, TruncationDirection, VertexPrediction, VertexRequest,
-    VertexResponse,
+    TokenizeRequest, TokenizeResponse, TruncationDirection, VectorSearchRequest,
+    VectorSearchResponse, VertexPrediction, VertexRequest, VertexResponse,
 };
+use crate::http::LanceDbState;
 use crate::{
     logging, shutdown, ClassifierModel, EmbeddingModel, ErrorResponse, ErrorType, Info, ModelType,
     ResponseMetadata,
@@ -23,10 +24,13 @@ use axum::{http, Json, Router};
 use axum_tracing_opentelemetry::middleware::OtelAxumLayer;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use datafusion_common::ScalarValue;
 use futures::future::join_all;
-use futures::FutureExt;
+use futures::{FutureExt, TryStreamExt};
 use http::header::AUTHORIZATION;
+use lancedb::query::Select;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use serde_json::{json, Map, Value};
 use simsimd::SpatialSimilarity;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -917,6 +921,234 @@ async fn embed_sparse(
     Ok((headers, Json(response)))
 }
 
+#[utoipa::path(
+post,
+tag = "Text Embeddings Inference",
+path = "/vector_search",
+request_body = VectorSearchRequest,
+responses(
+    (status = 200, description = "Vector search results", body = VectorSearchResponse),
+    (
+        status = 424,
+        description = "LanceDB is not configured",
+        body = ErrorResponse,
+        example = json ! ({"error": "LanceDB is not configured", "error_type": "backend"})
+    ),
+    (
+        status = 400,
+        description = "Vector search error",
+        body = ErrorResponse,
+        example = json ! ({"error": "A query vector or text input is required", "error_type": "validation"})
+    ),
+    (
+        status = 429,
+        description = "Model is overloaded",
+        body = ErrorResponse,
+        example = json ! ({"error": "Model is overloaded", "error_type": "overloaded"})
+    )
+)
+)]
+#[instrument(
+    skip_all,
+    fields(total_time, tokenization_time, queue_time, inference_time,)
+)]
+async fn vector_search(
+    infer: Extension<Infer>,
+    info: Extension<Info>,
+    Extension(context): Extension<Option<opentelemetry::Context>>,
+    Extension(lancedb): Extension<Option<LanceDbState>>,
+    Json(req): Json<VectorSearchRequest>,
+) -> Result<(HeaderMap, Json<VectorSearchResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let span = tracing::Span::current();
+    if let Some(context) = context {
+        span.set_parent(context);
+    }
+
+    let Some(state) = lancedb.clone() else {
+        let err = ErrorResponse {
+            error: "LanceDB is not configured".to_string(),
+            error_type: ErrorType::Backend,
+        };
+        return Err((StatusCode::FAILED_DEPENDENCY, Json(err)));
+    };
+
+    let start_time = Instant::now();
+
+    let truncate = req.truncate.unwrap_or(info.auto_truncate);
+
+    let mut compute_chars = 0;
+    let mut compute_tokens = 0;
+    let mut tokenization_time = Duration::ZERO;
+    let mut queue_time = Duration::ZERO;
+    let mut inference_time = Duration::ZERO;
+
+    let vector = if let Some(vector) = req.embedding.clone() {
+        vector
+    } else {
+        let text = req.text.clone().ok_or_else(|| {
+            let err = ErrorResponse {
+                error: "A query vector or text input is required".to_string(),
+                error_type: ErrorType::Validation,
+            };
+            (StatusCode::BAD_REQUEST, Json(err))
+        })?;
+
+        compute_chars = text.chars().count();
+
+        let permit = infer.try_acquire_permit().map_err(ErrorResponse::from)?;
+        let response = infer
+            .embed_pooled(
+                InputType::String(text),
+                truncate,
+                req.truncation_direction.into(),
+                req.prompt_name.clone(),
+                true,
+                None,
+                permit,
+            )
+            .await
+            .map_err(ErrorResponse::from)?;
+
+        tokenization_time = response.metadata.tokenization;
+        queue_time = response.metadata.queue;
+        inference_time = response.metadata.inference;
+        compute_tokens = response.metadata.prompt_tokens;
+
+        response.results
+    };
+
+    let mut query = state.table.vector_search(vector.clone()).map_err(|err| {
+        let err = ErrorResponse {
+            error: err.to_string(),
+            error_type: ErrorType::Backend,
+        };
+        (StatusCode::FAILED_DEPENDENCY, Json(err))
+    })?;
+
+    let top_k = req.top_k.unwrap_or(10);
+    if top_k == 0 {
+        let err = ErrorResponse {
+            error: "`top_k` must be greater than 0".to_string(),
+            error_type: ErrorType::Validation,
+        };
+        return Err((StatusCode::BAD_REQUEST, Json(err)));
+    }
+    query = query.limit(top_k);
+
+    let vector_column = req
+        .vector_column
+        .as_ref()
+        .or(state.default_vector_column.as_ref());
+    if let Some(column) = vector_column {
+        query = query.column(column);
+    }
+
+    if let Some(filter) = &req.filter {
+        if !filter.trim().is_empty() {
+            query = query.only_if(filter);
+        }
+    }
+
+    let mut selected_columns = req
+        .columns
+        .clone()
+        .unwrap_or_else(|| state.default_columns.clone());
+    if !selected_columns.is_empty() {
+        query = query.select(Select::columns(&selected_columns));
+    }
+
+    let include_row_id = req.with_row_id.unwrap_or(false)
+        || selected_columns.iter().any(|column| column == "_rowid");
+    if include_row_id {
+        query = query.with_row_id();
+    }
+
+    let mut stream = query.execute().await.map_err(|err| {
+        let err = ErrorResponse {
+            error: err.to_string(),
+            error_type: ErrorType::Backend,
+        };
+        (StatusCode::FAILED_DEPENDENCY, Json(err))
+    })?;
+
+    let batches = stream.try_collect::<Vec<_>>().await.map_err(|err| {
+        let err = ErrorResponse {
+            error: err.to_string(),
+            error_type: ErrorType::Backend,
+        };
+        (StatusCode::FAILED_DEPENDENCY, Json(err))
+    })?;
+
+    let mut results = Vec::new();
+    for batch in batches {
+        let schema = batch.schema();
+        for row in 0..batch.num_rows() {
+            let mut object = Map::with_capacity(schema.fields().len());
+            for (index, field) in schema.fields().iter().enumerate() {
+                let scalar =
+                    ScalarValue::try_from_array(batch.column(index), row).map_err(|err| {
+                        let err = ErrorResponse {
+                            error: err.to_string(),
+                            error_type: ErrorType::Backend,
+                        };
+                        (StatusCode::FAILED_DEPENDENCY, Json(err))
+                    })?;
+                let value = scalar_to_json_value(scalar);
+                object.insert(field.name().clone(), value);
+            }
+            results.push(Value::Object(object));
+        }
+    }
+
+    let metadata = ResponseMetadata::new(
+        compute_chars,
+        compute_tokens,
+        start_time,
+        tokenization_time,
+        queue_time,
+        inference_time,
+    );
+
+    metadata.record_span(&span);
+    metadata.record_metrics();
+
+    let headers = HeaderMap::from(metadata);
+
+    Ok((headers, Json(VectorSearchResponse { results })))
+}
+
+fn scalar_to_json_value(value: ScalarValue) -> Value {
+    use ScalarValue::*;
+
+    match value {
+        Null => Value::Null,
+        Boolean(v) => v.map(Value::Bool).unwrap_or(Value::Null),
+        Float32(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        Float64(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        Int8(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        Int16(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        Int32(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        Int64(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        UInt8(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        UInt16(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        UInt32(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        UInt64(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
+        Utf8(v) => v.map(Value::String).unwrap_or(Value::Null),
+        LargeUtf8(v) => v.map(Value::String).unwrap_or(Value::Null),
+        Binary(v) => v
+            .map(|bytes| Value::String(BASE64_STANDARD.encode(bytes)))
+            .unwrap_or(Value::Null),
+        FixedSizeBinary(_, v) => v
+            .map(|bytes| Value::String(BASE64_STANDARD.encode(bytes)))
+            .unwrap_or(Value::Null),
+        LargeBinary(v) => v
+            .map(|bytes| Value::String(BASE64_STANDARD.encode(bytes)))
+            .unwrap_or(Value::Null),
+        Dictionary(_, boxed) => scalar_to_json_value(*boxed),
+        other => Value::String(other.to_string()),
+    }
+}
+
 /// Get all Embeddings without Pooling.
 /// Returns a 424 status code if the model is not an embedding model.
 #[utoipa::path(
@@ -1604,6 +1836,7 @@ pub async fn run(
     payload_limit: usize,
     api_key: Option<String>,
     cors_allow_origin: Option<Vec<String>>,
+    lancedb_state: Option<LanceDbState>,
 ) -> Result<(), anyhow::Error> {
     // OpenAPI documentation
     #[derive(OpenApi)]
@@ -1617,6 +1850,7 @@ pub async fn run(
     embed_all,
     embed_sparse,
     openai_embed,
+    vector_search,
     similarity,
     tokenize,
     decode,
@@ -1665,6 +1899,8 @@ pub async fn run(
     DecodeRequest,
     DecodeResponse,
     ErrorType,
+    VectorSearchRequest,
+    VectorSearchResponse,
     )
     ),
     tags(
@@ -1736,6 +1972,7 @@ pub async fn run(
         .route("/embed", post(embed))
         .route("/embed_all", post(embed_all))
         .route("/embed_sparse", post(embed_sparse))
+        .route("/vector_search", post(vector_search))
         .route("/predict", post(predict))
         .route("/rerank", post(rerank))
         .route("/similarity", post(similarity))
@@ -1836,6 +2073,7 @@ pub async fn run(
         .merge(public_routes)
         .layer(Extension(infer))
         .layer(Extension(info))
+        .layer(Extension(lancedb_state.clone()))
         .layer(Extension(prom_handle.clone()))
         .layer(OtelAxumLayer::default())
         .layer(axum::middleware::from_fn(
