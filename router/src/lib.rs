@@ -62,6 +62,10 @@ pub async fn run(
     huggingface_hub_cache: Option<String>,
     payload_limit: usize,
     api_key: Option<String>,
+    lancedb_uri: Option<String>,
+    lancedb_table: Option<String>,
+    lancedb_vector_column: Option<String>,
+    lancedb_default_columns: Option<Vec<String>>,
     otlp_endpoint: Option<String>,
     otlp_service_name: String,
     prometheus_port: u16,
@@ -355,6 +359,45 @@ pub async fn run(
     compile_error!("Either feature `http` or `grpc` must be enabled.");
 
     #[cfg(feature = "http")]
+    use http::LanceDbState;
+
+    #[cfg(feature = "http")]
+    let lancedb_state = {
+        match (lancedb_uri, lancedb_table) {
+            (Some(uri), Some(table_name)) => {
+                let connection = lancedb::connect(uri).execute().await?;
+                let table = connection.open_table(table_name).execute().await?;
+                Some(LanceDbState::new(
+                    table,
+                    lancedb_vector_column,
+                    lancedb_default_columns.unwrap_or_default(),
+                ))
+            }
+            (Some(_), None) => {
+                return Err(anyhow!(
+                    "`--lancedb-table` must be provided when configuring LanceDB"
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(anyhow!(
+                    "`--lancedb-uri` must be provided when configuring LanceDB"
+                ));
+            }
+            (None, None) => None,
+        }
+    };
+
+    #[cfg(feature = "grpc")]
+    {
+        let _ = (
+            &lancedb_uri,
+            &lancedb_table,
+            &lancedb_vector_column,
+            &lancedb_default_columns,
+        );
+    }
+
+    #[cfg(feature = "http")]
     {
         http::server::run(
             infer,
@@ -364,6 +407,7 @@ pub async fn run(
             payload_limit,
             api_key,
             cors_allow_origin,
+            lancedb_state,
         )
         .await
     }

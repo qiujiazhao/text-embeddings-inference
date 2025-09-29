@@ -44,6 +44,20 @@ async fn check_health(port: u16, timeout: Duration) -> Result<()> {
 }
 
 pub async fn start_server(model_id: String, revision: Option<String>, dtype: DType) -> Result<()> {
+    start_server_with_config(model_id, revision, dtype, 8090, None, None, None, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn start_server_with_config(
+    model_id: String,
+    revision: Option<String>,
+    dtype: DType,
+    port: u16,
+    lancedb_uri: Option<String>,
+    lancedb_table: Option<String>,
+    lancedb_vector_column: Option<String>,
+    lancedb_default_columns: Option<Vec<String>>,
+) -> Result<()> {
     let server_task = tokio::spawn({
         run(
             model_id,
@@ -61,11 +75,15 @@ pub async fn start_server(model_id: String, revision: Option<String>, dtype: DTy
             None,
             None,
             None,
-            8090,
+            port,
             None,
             None,
             2_000_000,
             None,
+            lancedb_uri,
+            lancedb_table,
+            lancedb_vector_column,
+            lancedb_default_columns,
             None,
             "text-embeddings-inference.server".to_owned(),
             9000,
@@ -75,7 +93,7 @@ pub async fn start_server(model_id: String, revision: Option<String>, dtype: DTy
 
     tokio::select! {
         err = server_task => err?,
-        _ = check_health(8090, Duration::from_secs(60)) => Ok(())
+        _ = check_health(port, Duration::from_secs(60)) => Ok(())
     }?;
     Ok(())
 }

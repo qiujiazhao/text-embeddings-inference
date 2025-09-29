@@ -160,6 +160,22 @@ struct Args {
     #[clap(long, env)]
     api_key: Option<String>,
 
+    /// LanceDB connection URI used to enable vector search endpoints.
+    #[clap(long, env)]
+    lancedb_uri: Option<String>,
+
+    /// LanceDB table name that stores embeddings.
+    #[clap(long, env)]
+    lancedb_table: Option<String>,
+
+    /// Default LanceDB vector column to query against when multiple vector columns exist.
+    #[clap(long, env)]
+    lancedb_vector_column: Option<String>,
+
+    /// Default metadata columns to return from LanceDB results.
+    #[clap(long, env, value_delimiter = ',')]
+    lancedb_default_columns: Option<Vec<String>>,
+
     /// Outputs the logs in JSON format (useful for telemetry)
     #[clap(long, env)]
     json_output: bool,
@@ -244,6 +260,10 @@ async fn main() -> Result<()> {
         args.huggingface_hub_cache,
         args.payload_limit,
         args.api_key,
+        args.lancedb_uri,
+        args.lancedb_table,
+        args.lancedb_vector_column,
+        args.lancedb_default_columns,
         args.otlp_endpoint,
         args.otlp_service_name,
         args.prometheus_port,
